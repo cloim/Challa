@@ -1,6 +1,9 @@
 use crate::events::{EngineEvent, KeyStroke};
+use crate::injector::TextInjector;
+use crate::matcher::SnippetMatcher;
 use crate::privacy_guard::{PrivacyChecker, WindowsPrivacyGuard};
 use crate::ring_buffer::SecureRingBuffer;
+use crate::snippet::SnippetContent;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
@@ -29,6 +32,8 @@ struct HookContext {
     privacy_guard: Arc<dyn PrivacyChecker>,
     event_sender: Option<Sender<EngineEvent>>,
     keyword_callback: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    matcher: Option<Arc<Mutex<SnippetMatcher>>>,
+    injector: Option<Arc<TextInjector>>,
 }
 
 static GLOBAL_HOOK_CONTEXT: OnceLock<Mutex<Option<HookContext>>> = OnceLock::new();
@@ -163,6 +168,38 @@ fn handle_key_down(ctx: &HookContext, vk_code: u32, scan_code: u32) {
                 if let Some(ref cb) = ctx.keyword_callback {
                     cb(&current_content);
                 }
+
+                // Check snippet match and auto-inject
+                if let (Some(matcher_arc), Some(injector_arc)) = (&ctx.matcher, &ctx.injector) {
+                    let matched = if let Ok(matcher) = matcher_arc.lock() {
+                        matcher.find_match(&current_content)
+                    } else {
+                        None
+                    };
+
+                    if let Some(match_res) = matched {
+                        match &match_res.snippet.content {
+                            SnippetContent::PlainText(text) => {
+                                injector_arc.inject(text, match_res.backspace_count);
+                                if let Ok(mut buf) = ctx.buffer.lock() {
+                                    buf.clear();
+                                }
+                                if let Some(ref sender) = ctx.event_sender {
+                                    let _ = sender.send(EngineEvent::KeywordMatched(
+                                        match_res.snippet.keyword,
+                                    ));
+                                }
+                            }
+                            SnippetContent::BitwardenRef { .. } => {
+                                if let Some(ref sender) = ctx.event_sender {
+                                    let _ = sender.send(EngineEvent::KeywordMatched(
+                                        match_res.snippet.keyword,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -213,6 +250,8 @@ pub struct KeyboardHook {
     privacy_guard: Arc<dyn PrivacyChecker>,
     event_sender: Option<Sender<EngineEvent>>,
     keyword_callback: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    matcher: Option<Arc<Mutex<SnippetMatcher>>>,
+    injector: Option<Arc<TextInjector>>,
 }
 
 impl KeyboardHook {
@@ -222,6 +261,8 @@ impl KeyboardHook {
             privacy_guard: Arc::new(WindowsPrivacyGuard::new()),
             event_sender: None,
             keyword_callback: None,
+            matcher: None,
+            injector: None,
         }
     }
 
@@ -248,6 +289,16 @@ impl KeyboardHook {
         self
     }
 
+    pub fn with_matcher(mut self, matcher: Arc<Mutex<SnippetMatcher>>) -> Self {
+        self.matcher = Some(matcher);
+        self
+    }
+
+    pub fn with_injector(mut self, injector: Arc<TextInjector>) -> Self {
+        self.injector = Some(injector);
+        self
+    }
+
     /// Starts the low-level keyboard hook on a dedicated background thread.
     pub fn start(self) -> Result<KeyboardHookHandle, anyhow::Error> {
         let (ready_tx, ready_rx) = channel::<Result<u32, String>>();
@@ -264,6 +315,8 @@ impl KeyboardHook {
                 privacy_guard: self.privacy_guard,
                 event_sender: self.event_sender,
                 keyword_callback: self.keyword_callback,
+                matcher: self.matcher,
+                injector: self.injector,
             });
         }
 
@@ -343,18 +396,29 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn test_keyboard_hook_lifecycle() {
+    fn test_keyboard_hook_with_matcher() {
         let mock_guard = Arc::new(MockPrivacyGuard::new(false));
         let (tx, _rx) = channel();
 
+        let mut matcher = SnippetMatcher::new();
+        matcher.add_snippet(crate::snippet::Snippet::plain_text(
+            "test_1",
+            "Hello",
+            ":hi",
+            "Hello, Challa!",
+        ));
+        let matcher_arc = Arc::new(Mutex::new(matcher));
+        let injector_arc = Arc::new(TextInjector::new());
+
         let hook = KeyboardHook::new()
             .with_privacy_guard(mock_guard)
+            .with_matcher(matcher_arc)
+            .with_injector(injector_arc)
             .with_event_sender(tx);
 
-        let mut handle = hook.start().expect("Hook should start successfully");
+        let mut handle = hook.start().expect("Hook should start with matcher");
         assert!(handle.thread_handle.is_some());
 
-        // Wait a tiny bit and stop cleanly
         thread::sleep(Duration::from_millis(50));
         handle.stop();
     }

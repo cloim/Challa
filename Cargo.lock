@@ -489,6 +489,7 @@ name = "challa-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "challa-bitwarden",
  "secrecy",
  "serde",
  "serde_json",

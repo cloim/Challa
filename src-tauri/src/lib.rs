@@ -1,11 +1,15 @@
 use challa_bitwarden::BitwardenClient;
-use challa_core::{KeyboardHook, KeyboardHookHandle};
-use std::sync::Mutex;
+use challa_core::{
+    KeyboardHook, KeyboardHookHandle, Snippet, SnippetMatcher, TextInjector, TriggerMode,
+};
+use std::sync::{Arc, Mutex};
 use tauri::State;
 use tracing::{info, warn};
 
 pub struct AppState {
     pub hook_handle: Mutex<Option<KeyboardHookHandle>>,
+    pub matcher: Arc<Mutex<SnippetMatcher>>,
+    pub injector: Arc<TextInjector>,
     pub bitwarden: Mutex<BitwardenClient>,
 }
 
@@ -33,6 +37,25 @@ fn get_vault_status(state: State<'_, AppState>) -> String {
     format!("{:?}", client.status())
 }
 
+#[tauri::command]
+fn list_snippets(state: State<'_, AppState>) -> Vec<Snippet> {
+    let matcher = state.matcher.lock().unwrap();
+    matcher.list_snippets().into_iter().cloned().collect()
+}
+
+#[tauri::command]
+fn add_snippet(state: State<'_, AppState>, snippet: Snippet) -> Result<(), String> {
+    let mut matcher = state.matcher.lock().unwrap();
+    matcher.add_snippet(snippet);
+    Ok(())
+}
+
+#[tauri::command]
+fn remove_snippet(state: State<'_, AppState>, id: String) -> Result<bool, String> {
+    let mut matcher = state.matcher.lock().unwrap();
+    Ok(matcher.remove_snippet(&id))
+}
+
 pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -43,8 +66,29 @@ pub fn run() {
 
     info!("Starting Challa application...");
 
-    // Initialize keyboard hook
+    // Initialize Snippet Matcher with default welcome snippets
+    let mut matcher = SnippetMatcher::new();
+    matcher.add_snippet(Snippet::plain_text(
+        "welcome_1",
+        "Challa 소개",
+        ":challa",
+        "Challa: Rust & Tauri v2 기반 고보안 텍스트 익스팬더",
+    ));
+    matcher.add_snippet(Snippet::plain_text_with_trigger(
+        "welcome_2",
+        "서명 템플릿",
+        ":sig",
+        "감사합니다.\nChalla 드림",
+        TriggerMode::Space,
+    ));
+
+    let matcher_arc = Arc::new(Mutex::new(matcher));
+    let injector_arc = Arc::new(TextInjector::new());
+
+    // Initialize keyboard hook with matcher and injector
     let hook_result = KeyboardHook::new()
+        .with_matcher(Arc::clone(&matcher_arc))
+        .with_injector(Arc::clone(&injector_arc))
         .with_keyword_callback(|current| {
             info!("Keystroke captured, current buffer: {}", current);
         })
@@ -52,7 +96,7 @@ pub fn run() {
 
     let hook_handle = match hook_result {
         Ok(handle) => {
-            info!("Low-level keyboard hook active");
+            info!("Low-level keyboard hook active with Snippet Matcher and Injector");
             Some(handle)
         }
         Err(e) => {
@@ -63,6 +107,8 @@ pub fn run() {
 
     let app_state = AppState {
         hook_handle: Mutex::new(hook_handle),
+        matcher: matcher_arc,
+        injector: injector_arc,
         bitwarden: Mutex::new(BitwardenClient::new()),
     };
 
@@ -72,7 +118,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_hook_status,
             clear_buffer,
-            get_vault_status
+            get_vault_status,
+            list_snippets,
+            add_snippet,
+            remove_snippet
         ])
         .setup(|_app| {
             info!("Challa Tauri v2 setup completed");

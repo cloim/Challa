@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+challa-bitwarden = { path = "../bitwarden-client" }
 windows.workspace = true
 zeroize.workspace = true
 secrecy.workspace = true
