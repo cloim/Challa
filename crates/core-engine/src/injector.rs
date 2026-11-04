@@ -1,5 +1,5 @@
 use std::mem::size_of;
-use std::thread::sleep;
+use std::thread::{self, sleep};
 use std::time::Duration;
 use tracing::{debug, error, trace, warn};
 
@@ -16,23 +16,85 @@ use windows::Win32::System::DataExchange::{
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
-    KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK, VK_CONTROL,
+    GetKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_LCONTROL, VK_LMENU,
+    VK_LSHIFT, VK_MENU, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_SHIFT,
 };
 
 // Standard CF_UNICODETEXT is 13
 const CF_UNICODETEXT_ID: u32 = 13;
 
-/// Threshold length under which text is injected directly via Unicode keystrokes.
-pub const DIRECT_UNICODE_THRESHOLD: usize = 64;
-
-/// Text injection engine supporting both secure direct typing and safe clipboard fallback.
+/// Text injection engine following Beeftext's proven architecture:
+/// 1. Backs up and releases modifier keys (Shift, Ctrl, Alt) to prevent key combination corruption.
+/// 2. Synthesizes backspaces with micro-pauses for target application message queues.
+/// 3. Pastes snippet via clipboard with Windows privacy flags.
+/// 4. Restores modifier keys.
+/// 5. Schedules a delayed clipboard restore (1000ms) so target app reliably finishes reading.
 #[derive(Debug, Default, Clone)]
 pub struct TextInjector;
 
 impl TextInjector {
     pub fn new() -> Self {
         Self
+    }
+
+    /// Backs up currently pressed modifier keys and synthesizes key-up events for them.
+    #[cfg(target_os = "windows")]
+    pub fn backup_and_release_modifiers(&self) -> Vec<VIRTUAL_KEY> {
+        let modifier_keys = [
+            VK_LCONTROL,
+            VK_RCONTROL,
+            VK_CONTROL,
+            VK_LMENU,
+            VK_RMENU,
+            VK_MENU,
+            VK_LSHIFT,
+            VK_RSHIFT,
+            VK_SHIFT,
+        ];
+
+        let mut pressed = Vec::new();
+        for &vk in &modifier_keys {
+            let state = unsafe { GetKeyState(vk.0 as i32) as u16 };
+            if (state & 0x8000) != 0 {
+                pressed.push(vk);
+                self.synthesize_key_event(vk, true); // key up
+            }
+        }
+        pressed
+    }
+
+    /// Restores previously pressed modifier keys by synthesizing key-down events.
+    #[cfg(target_os = "windows")]
+    pub fn restore_modifiers(&self, keys: &[VIRTUAL_KEY]) {
+        for &vk in keys {
+            self.synthesize_key_event(vk, false); // key down
+        }
+    }
+
+    /// Synthesizes a single key down or key up event.
+    #[cfg(target_os = "windows")]
+    fn synthesize_key_event(&self, vk: VIRTUAL_KEY, is_up: bool) {
+        let dw_flags = if is_up {
+            KEYEVENTF_KEYUP
+        } else {
+            KEYBD_EVENT_FLAGS(0)
+        };
+        let input = [INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: 0,
+                    dwFlags: dw_flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }];
+        unsafe {
+            let _ = SendInput(&input, size_of::<INPUT>() as i32);
+        }
     }
 
     /// Erases `count` characters using synthesized Backspace events.
@@ -82,107 +144,9 @@ impl TextInjector {
         }
     }
 
-    /// Directly types Unicode characters via `SendInput(KEYEVENTF_UNICODE)`.
-    /// Completely bypasses clipboard; 100% private and ideal for passwords and short snippets.
-    pub fn inject_unicode_text(&self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            let utf16_units: Vec<u16> = text.encode_utf16().collect();
-            let mut inputs = Vec::with_capacity(utf16_units.len() * 2);
-
-            for &unit in &utf16_units {
-                // Key down with KEYEVENTF_UNICODE
-                inputs.push(INPUT {
-                    r#type: INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wVk: VIRTUAL_KEY(0),
-                            wScan: unit,
-                            dwFlags: KEYEVENTF_UNICODE,
-                            time: 0,
-                            dwExtraInfo: 0,
-                        },
-                    },
-                });
-
-                // Key up with KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
-                inputs.push(INPUT {
-                    r#type: INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wVk: VIRTUAL_KEY(0),
-                            wScan: unit,
-                            dwFlags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
-                            time: 0,
-                            dwExtraInfo: 0,
-                        },
-                    },
-                });
-            }
-
-            unsafe {
-                let sent = SendInput(&inputs, size_of::<INPUT>() as i32);
-                debug!(
-                    "SendInput directly typed {} unicode code units (sent: {})",
-                    utf16_units.len(),
-                    sent
-                );
-            }
-        }
-    }
-
-    /// Injects multiline or large text through the Windows clipboard with privacy flags,
-    /// triggering Ctrl+V and immediately restoring the original clipboard content.
-    pub fn inject_safe_clipboard(&self, text: &str) {
-        #[cfg(target_os = "windows")]
-        {
-            let original_content = self.read_clipboard_text();
-
-            if self.set_clipboard_text_with_privacy_guard(text) {
-                // Simulate Ctrl+V (Paste)
-                self.simulate_paste();
-
-                // Wait for the recipient window to consume the paste command
-                sleep(Duration::from_millis(35));
-
-                // Restore previous clipboard content
-                if let Some(prev) = original_content {
-                    let _ = self.set_clipboard_text_with_privacy_guard(&prev);
-                } else {
-                    self.clear_clipboard();
-                }
-            } else {
-                warn!("Clipboard write failed, falling back to direct Unicode typing");
-                self.inject_unicode_text(text);
-            }
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = text;
-        }
-    }
-
-    /// High-level injection entry point: erases keyword and injects snippet content.
-    pub fn inject(&self, text: &str, backspace_count: usize) {
-        self.erase_characters(backspace_count);
-
-        let is_short_single_line =
-            text.len() <= DIRECT_UNICODE_THRESHOLD && !text.contains('\n') && !text.contains('\r');
-
-        if is_short_single_line {
-            self.inject_unicode_text(text);
-        } else {
-            self.inject_safe_clipboard(text);
-        }
-    }
-
+    /// Simulates Ctrl+V (Paste).
     #[cfg(target_os = "windows")]
-    fn simulate_paste(&self) {
-        // VK_V is 0x56
+    pub fn simulate_paste(&self) {
         let vk_v = VIRTUAL_KEY(0x56);
 
         let inputs = [
@@ -245,9 +209,123 @@ impl TextInjector {
         }
     }
 
+    /// Performs the complete text substitution sequence following Beeftext's robust method:
+    /// 1. Short pause (15ms) for the triggering key to register in the target window.
+    /// 2. Release any physically held modifier keys (e.g. Shift from typing ':').
+    /// 3. Synthesize Backspaces to erase the keyword.
+    /// 4. Short pause (15ms) for target window to process Backspaces.
+    /// 5. Back up existing clipboard content.
+    /// 6. Set new snippet text in clipboard with privacy flags.
+    /// 7. Send Ctrl+V.
+    /// 8. Restore modifier keys.
+    /// 9. Asynchronously restore original clipboard content after 1000ms.
+    pub fn perform_substitution(&self, text: &str, backspace_count: usize) {
+        #[cfg(target_os = "windows")]
+        {
+            // Step 1: Wait 15ms for target app to finish rendering the triggering keystroke
+            sleep(Duration::from_millis(15));
+
+            // Step 2: Release modifiers (e.g. Shift key from typing ':')
+            let pressed_mods = self.backup_and_release_modifiers();
+
+            // Step 3: Erase the keyword
+            if backspace_count > 0 {
+                self.erase_characters(backspace_count);
+            }
+
+            // Step 4: Wait 15ms for target editor to process backspaces
+            sleep(Duration::from_millis(15));
+
+            // Step 5: Read original clipboard
+            let original_clipboard = self.read_clipboard_text();
+
+            // Step 6: Ensure CRLF line endings for Windows apps (Notepad, etc.)
+            let formatted_text = if text.contains('\n') && !text.contains("\r\n") {
+                text.replace('\n', "\r\n")
+            } else {
+                text.to_string()
+            };
+
+            // Step 7: Set clipboard with privacy flags and Paste
+            if self.set_clipboard_text_with_privacy_guard(&formatted_text) {
+                self.simulate_paste();
+
+                // Step 8: Restore modifier keys
+                self.restore_modifiers(&pressed_mods);
+
+                // Step 9: Schedule clipboard restoration after 1000ms (Beeftext standard)
+                // in an isolated background thread so it never blocks the editor!
+                let prev_content = original_clipboard;
+                thread::spawn(move || {
+                    sleep(Duration::from_millis(1000));
+                    let injector = TextInjector::new();
+                    if let Some(prev) = prev_content {
+                        let _ = injector.set_clipboard_text_with_privacy_guard(&prev);
+                    } else {
+                        injector.clear_clipboard();
+                    }
+                    debug!("Original clipboard content restored");
+                });
+            } else {
+                warn!("Clipboard insertion failed, falling back to direct typing");
+                self.inject_unicode_text(text);
+                self.restore_modifiers(&pressed_mods);
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = (text, backspace_count);
+        }
+    }
+
+    /// Directly types Unicode characters via `SendInput(KEYEVENTF_UNICODE)`.
+    pub fn inject_unicode_text(&self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let utf16_units: Vec<u16> = text.encode_utf16().collect();
+            let mut inputs = Vec::with_capacity(utf16_units.len() * 2);
+
+            for &unit in &utf16_units {
+                inputs.push(INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: VIRTUAL_KEY(0),
+                            wScan: unit,
+                            dwFlags: KEYEVENTF_UNICODE,
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
+                    },
+                });
+
+                inputs.push(INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: VIRTUAL_KEY(0),
+                            wScan: unit,
+                            dwFlags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
+                    },
+                });
+            }
+
+            unsafe {
+                let _ = SendInput(&inputs, size_of::<INPUT>() as i32);
+            }
+        }
+    }
+
     #[cfg(target_os = "windows")]
     fn open_clipboard_with_retry() -> bool {
-        for _ in 0..5 {
+        for _ in 0..10 {
             if unsafe { OpenClipboard(None).is_ok() } {
                 return true;
             }
@@ -380,7 +458,6 @@ mod tests {
     #[test]
     fn test_injector_instantiation() {
         let injector = TextInjector::new();
-        // Erase 0 characters should safely do nothing
         injector.erase_characters(0);
     }
 }

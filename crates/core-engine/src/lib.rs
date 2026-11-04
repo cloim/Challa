@@ -7,7 +7,7 @@ pub mod ring_buffer;
 pub mod snippet;
 
 pub use events::{EngineEvent, KeyStroke};
-pub use injector::{TextInjector, DIRECT_UNICODE_THRESHOLD};
+pub use injector::TextInjector;
 pub use keyboard_hook::{KeyboardHook, KeyboardHookHandle};
 pub use matcher::{MatchResult, SnippetMatcher};
 pub use privacy_guard::{MockPrivacyGuard, PrivacyChecker, WindowsPrivacyGuard};
