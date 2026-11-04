@@ -70,14 +70,27 @@ pub fn run() {
     let mut matcher = SnippetMatcher::new();
     matcher.add_snippet(Snippet::plain_text(
         "welcome_1",
-        "Challa 소개",
+        "Challa 소개 (콜론 접두사)",
         ":challa",
+        "Challa: Rust & Tauri v2 기반 고보안 텍스트 익스팬더",
+    ));
+    matcher.add_snippet(Snippet::plain_text(
+        "welcome_1_plain",
+        "Challa 소개 (단어 직접 입력)",
+        "challa",
         "Challa: Rust & Tauri v2 기반 고보안 텍스트 익스팬더",
     ));
     matcher.add_snippet(Snippet::plain_text_with_trigger(
         "welcome_2",
-        "서명 템플릿",
+        "서명 템플릿 (콜론 접두사)",
         ":sig",
+        "감사합니다.\nChalla 드림",
+        TriggerMode::Space,
+    ));
+    matcher.add_snippet(Snippet::plain_text_with_trigger(
+        "welcome_2_plain",
+        "서명 템플릿 (단어 직접 입력)",
+        "sig",
         "감사합니다.\nChalla 드림",
         TriggerMode::Space,
     ));
@@ -90,7 +103,7 @@ pub fn run() {
         .with_matcher(Arc::clone(&matcher_arc))
         .with_injector(Arc::clone(&injector_arc))
         .with_keyword_callback(|current| {
-            info!("Keystroke captured, current buffer: {}", current);
+            info!("Keystroke captured, current buffer: {:?}", current);
         })
         .start();
 

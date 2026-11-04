@@ -17,7 +17,7 @@ use windows::Win32::System::Threading::GetCurrentThreadId;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyboardLayout, GetKeyboardState, GetKeyState, ToUnicodeEx, VIRTUAL_KEY, VK_BACK,
-    VK_CONTROL, VK_ESCAPE, VK_MENU, VK_SHIFT,
+    VK_CAPITAL, VK_CONTROL, VK_ESCAPE, VK_MENU, VK_SHIFT,
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -127,9 +127,23 @@ fn handle_key_down(ctx: &HookContext, vk_code: u32, scan_code: u32) {
 
     // 4. Translate Virtual Key to Character using ToUnicodeEx
     let mut key_state = [0u8; 256];
-    let ok = unsafe { GetKeyboardState(&mut key_state) };
-    if ok.is_err() {
-        return;
+    let _ = unsafe { GetKeyboardState(&mut key_state) };
+
+    // In WH_KEYBOARD_LL, the hook thread does not have window focus,
+    // so GetKeyboardState lacks the caller's modifier keys (Shift, CapsLock).
+    // Synchronize modifier states from GetKeyState:
+    if shift {
+        key_state[VK_SHIFT.0 as usize] = 0x80;
+    }
+    if ctrl {
+        key_state[VK_CONTROL.0 as usize] = 0x80;
+    }
+    if alt {
+        key_state[VK_MENU.0 as usize] = 0x80;
+    }
+    let caps = unsafe { (GetKeyState(VK_CAPITAL.0 as i32) as u16 & 0x0001) != 0 };
+    if caps {
+        key_state[VK_CAPITAL.0 as usize] = 0x01;
     }
 
     let layout = unsafe { GetKeyboardLayout(0) };
@@ -148,9 +162,12 @@ fn handle_key_down(ctx: &HookContext, vk_code: u32, scan_code: u32) {
 
     if result > 0 {
         let chars = String::from_utf16_lossy(&unicode_buf[..result as usize]);
-        for ch in chars.chars() {
+        for raw_ch in chars.chars() {
+            // Normalize carriage return to newline
+            let ch = if raw_ch == '\r' { '\n' } else { raw_ch };
+
             // Only buffer printable characters, spaces, and enter
-            if !ch.is_control() || ch == '\n' || ch == '\r' || ch == '\t' {
+            if !ch.is_control() || ch == '\n' || ch == '\t' {
                 let current_content = if let Ok(mut buf) = ctx.buffer.lock() {
                     buf.push(ch);
                     buf.as_string()
