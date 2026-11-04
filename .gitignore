@@ -1,0 +1,21 @@
+# Worktrees & Temp
+.worktrees/
+%programdata%/
+
+# Rust & Cargo
+/target/
+crates/**/target/
+src-tauri/target/
+**/*.rs.bk
+
+# Node & Frontend
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
