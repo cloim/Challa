@@ -1,0 +1,21 @@
+[package]
+name = "challa"
+description = "Challa desktop application"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+challa-core = { path = "../crates/core-engine" }
+challa-bitwarden = { path = "../crates/bitwarden-client" }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio.workspace = true
+anyhow.workspace = true

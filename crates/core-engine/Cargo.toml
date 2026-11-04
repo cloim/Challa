@@ -1,0 +1,20 @@
+[package]
+name = "challa-core"
+description = "Core keyboard hook, secure buffer, and text injection engine for Challa"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+windows.workspace = true
+zeroize.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true
