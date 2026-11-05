@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "icons": "node scripts/build-icons.mjs",
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview"
@@ -11,14 +12,20 @@
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-shell": "^2.0.0",
+    "ag-grid-community": "36.1.0",
+    "ag-grid-react": "36.1.0",
     "lucide-react": "^1.16.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "4.3.4",
+    "@tauri-apps/cli": "^2.12.4",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.4",
+    "playwright": "^1.64.1",
+    "tailwindcss": "4.3.4",
     "typescript": "^5.7.3",
     "vite": "^6.2.0"
   }

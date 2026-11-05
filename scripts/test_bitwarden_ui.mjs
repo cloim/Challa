@@ -1,0 +1,117 @@
+// Run after Bitwarden UI changes: node scripts/test_bitwarden_ui.mjs [local-vite-url]
+// Isolated IPC fixtures only. No network authentication or real vault data.
+import { chromium } from "playwright";
+import assert from "node:assert/strict";
+import { mkdir, writeFile } from "node:fs/promises";
+const directory = new URL("../docs/bitwarden-ui/", import.meta.url);
+await mkdir(directory, { recursive: true });
+const browser = await chromium.launch({ headless: true });
+const errors = [], passed = [];
+const url = process.argv[2] ?? "http://127.0.0.1:4179";
+const context = await browser.newContext({ viewport: { width: 1280, height: 820 } });
+await context.addInitScript(() => {
+  window.isTauri = true;
+  const item = { id: "00000000-0000-4000-8000-000000000001", name: "테스트 계정", username: "fixture@example.com", fields: ["Username", "Password", "Totp", "Notes", { Custom: "apiKey" }] };
+  window.bwFixture = { status: "Unauthenticated", failLogin: true, failUnlock: true, failSync: false, snippets: [], calls: [] };
+  const info = () => ({ status: window.bwFixture.status, cli_available: true, cached_fields: window.bwFixture.status === "Unlocked" ? window.bwFixture.snippets.length : 0, auto_lock_minutes: 15 });
+  let callback = 0;
+  window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
+  window.__TAURI_INTERNALS__ = { transformCallback: () => ++callback, unregisterCallback() {}, invoke: async (command, args) => {
+    const f = window.bwFixture;
+    f.calls.push(command);
+    switch (command) {
+      case "plugin:event|listen": return ++callback;
+      case "plugin:event|unlisten": return;
+      case "get_productivity_state": return { settings: {active_profile:"work", rules:[]}, effective_profile:"work", application:"fixture.exe", readiness:{} };
+      case "diagnose_snippet": return [];
+      case "get_engine_status": return { active: true, paused: false, vault: f.status, error: null };
+      case "list_snippets": return f.snippets;
+      case "inspect_vault": case "get_vault_status": return info();
+      case "login_vault": if (f.failLogin) throw new Error("테스트 인증 실패"); f.status = "Locked"; return info();
+      case "unlock_vault": if (f.failUnlock) throw new Error("테스트 잠금 해제 실패"); f.status = "Unlocked"; return info();
+      case "list_vault_items": if (f.status !== "Unlocked") throw new Error("보관함 잠김"); return [item];
+      case "lock_vault": f.status = "Locked"; return;
+      case "logout_vault": f.status = "Unauthenticated"; return info();
+      case "sync_vault": if (f.failSync) throw new Error("테스트 동기화 실패"); return info();
+      case "add_snippet": f.snippets = [...f.snippets.filter(s => s.id !== args.snippet.id), args.snippet]; return;
+      case "remove_snippet": f.snippets = f.snippets.filter(s => s.id !== args.id); return true;
+      case "clear_buffer": case "set_engine_paused": return;
+      default: throw new Error(`unexpected command: ${command}`);
+    }
+  } };
+});
+const page = await context.newPage();
+page.on("pageerror", e => errors.push(e.message));
+const shot = async name => page.screenshot({ path: new URL(`${name}.png`, directory).pathname.replace(/^\/(\w:)/, "$1") });
+try {
+  await page.goto(`${url}/#/vault`);
+  await page.getByLabel("Client ID", { exact: true }).fill("user.fixture");
+  await page.getByLabel("Client Secret", { exact: true }).fill("fixture-input");
+  await page.getByRole("button", { name: "로그인", exact: true }).click();
+  await page.getByRole("alert").filter({ hasText: "테스트 인증 실패" }).waitFor();
+  assert.equal(await page.getByLabel("Client Secret", { exact: true }).inputValue(), "");
+  passed.push("authentication_failure_clears_secret");
+  await page.evaluate(() => { window.bwFixture.failLogin = false; });
+  await page.getByLabel("Client Secret", { exact: true }).fill("fixture-input");
+  await page.getByRole("button", { name: "로그인", exact: true }).click();
+  await page.getByLabel("마스터 비밀번호", { exact: true }).waitFor();
+  passed.push("api_login_to_locked_state");
+  await shot("locked");
+  await page.getByLabel("마스터 비밀번호", { exact: true }).fill("fixture-input");
+  await page.getByRole("button", { name: "잠금 해제", exact: true }).click();
+  await page.getByRole("alert").filter({ hasText: "테스트 잠금 해제 실패" }).waitFor();
+  assert.equal(await page.getByLabel("마스터 비밀번호", { exact: true }).inputValue(), "");
+  passed.push("unlock_failure_clears_master_password");
+  await page.evaluate(() => { window.bwFixture.failUnlock = false; });
+  await page.getByLabel("마스터 비밀번호", { exact: true }).fill("fixture-input");
+  await page.getByRole("button", { name: "잠금 해제", exact: true }).click();
+  await page.getByRole("gridcell").filter({ hasText: "테스트 계정" }).click();
+  await page.getByLabel("연결할 필드", { exact: true }).selectOption(JSON.stringify({ Custom: "apiKey" }));
+  await shot("unlocked");
+  await page.getByRole("button", { name: "스니펫으로 연결", exact: true }).click();
+  await page.getByLabel("단축어", { exact: true }).fill(":vault");
+  await page.getByLabel("보관함 필드", { exact: true }).waitFor();
+  assert.equal(await page.getByLabel("보관함 필드", { exact: true }).inputValue(), JSON.stringify({ Custom: "apiKey" }));
+  assert.equal(await page.getByRole("textbox", { name: "치환할 내용" }).count(), 0);
+  await page.getByRole("button", { name: "저장", exact: true }).click();
+  await page.getByRole("status").filter({ hasText: "암호화해 저장" }).waitFor();
+  const saved = await page.evaluate(() => window.bwFixture.snippets[0]);
+  assert.deepEqual(saved.content, { BitwardenRef: { item_id: "00000000-0000-4000-8000-000000000001", field: { Custom: "apiKey" } } });
+  assert.equal(saved.trigger_mode, "Space");
+  passed.push("reference_selection_and_reference_only_persistence");
+  await shot("reference-editor");
+  await page.getByRole("button", { name: "편집 취소", exact: true }).click();
+  await page.getByRole("button", { name: "보관함 열기", exact: true }).click();
+  await page.getByLabel("보관함 검색", { exact: true }).fill("없는 항목");
+  await page.getByText("검색 조건에 맞는 보관함 항목이 없어요", { exact: true }).waitFor();
+  await page.getByLabel("보관함 검색", { exact: true }).fill("");
+  passed.push("vault_search_empty_state");
+  await page.evaluate(() => { window.bwFixture.failSync = true; });
+  await page.getByRole("button", { name: "보관함 동기화", exact: true }).click();
+  await page.getByRole("alert").filter({ hasText: "테스트 동기화 실패" }).waitFor();
+  passed.push("sync_failure_recovery");
+  await page.getByRole("button", { name: "보관함 잠그기", exact: true }).click();
+  await page.getByLabel("마스터 비밀번호", { exact: true }).waitFor();
+  assert.equal(await page.locator(".ag-row").count(), 0);
+  passed.push("lock_removes_vault_metadata");
+  for (const width of [720, 390, 325]) {
+    await page.setViewportSize({ width, height: 844 });
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
+    assert.equal(overflow, false);
+    assert.ok(await page.getByRole("button", { name: "잠금 해제", exact: true }).isVisible());
+    await shot(`locked-${width}`);
+  }
+  passed.push("locked_responsive_720_390_325");
+  await page.getByRole("button", { name: "보관함 로그아웃", exact: true }).click();
+  await page.getByLabel("Client ID", { exact: true }).waitFor();
+  passed.push("logout_returns_to_login");
+  const preview = await browser.newPage();
+  await preview.goto(`${url}/#/vault`);
+  await preview.getByText("데스크톱에서 보관함을 연결하세요", { exact: true }).waitFor();
+  assert.equal(await preview.locator('input[type="password"]').count(), 0);
+  passed.push("browser_preview_never_collects_credentials");
+  assert.deepEqual(errors, []);
+  const result = { passed: true, scenarios: passed, errors };
+  await writeFile(new URL("results.json", directory), JSON.stringify(result, null, 2));
+  console.log(JSON.stringify(result));
+} finally { await browser.close(); }

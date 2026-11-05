@@ -12,6 +12,7 @@ src-tauri/target/
 node_modules/
 dist/
 dist-ssr/
+docs/
 *.local
 
 # IDE & OS
