@@ -22,7 +22,7 @@ export function DataGrid<T extends { id: string }>({ rows, columns, loading, err
     <AgGridReact<T> theme={theme} rowData={rows} columnDefs={columns} headerHeight={44} rowHeight={78}
       getRowId={({ data }) => data.id} loading={loading} animateRows={false}
       defaultColDef={{ sortable: true, resizable: true, suppressMovable: true }}
-      getRowClass={({ data }) => data?.id === selectedId ? "selected-snippet" : undefined}
+      rowClassRules={{ "selected-snippet": ({ data }) => !!data && data.id === selectedId }}
       onRowClicked={(event: RowClickedEvent<T>) => { if (event.data) onSelect(event.data); }}
       onCellKeyDown={(event) => { if ((event.event as KeyboardEvent)?.key === "Enter" && event.data) onSelect(event.data); }}
       onSortChanged={({ api }) => { const column = api.getColumnState().find(c => c.sort); setSort(column ? `${column.colId} ${column.sort === "asc" ? "오름차순" : "내림차순"}` : ""); }}
