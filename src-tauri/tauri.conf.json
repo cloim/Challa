@@ -11,14 +11,18 @@
     "windows": [
       {
         "title": "Challa",
-        "width": 800,
-        "height": 600,
+        "visible": false,
+        "width": 1280,
+        "height": 820,
+        "minWidth": 720,
+        "minHeight": 540,
+        "theme": "Dark",
         "resizable": true,
         "fullscreen": false
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'self'"
     }
   },
   "bundle": {
