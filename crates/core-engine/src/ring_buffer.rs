@@ -36,7 +36,11 @@ impl SecureRingBuffer {
 
     /// Creates a new `SecureRingBuffer` with specified capacity and timeout.
     pub fn with_capacity_and_timeout(capacity: usize, idle_timeout: Duration) -> Self {
-        let cap = if capacity == 0 { DEFAULT_BUFFER_CAPACITY } else { capacity };
+        let cap = if capacity == 0 {
+            DEFAULT_BUFFER_CAPACITY
+        } else {
+            capacity
+        };
         let mut data = vec!['\0'; cap];
 
         let locked = Self::lock_memory(&mut data);
@@ -170,7 +174,8 @@ impl SecureRingBuffer {
 
     /// Securely zeroes out all memory slots and resets pointers.
     pub fn clear(&mut self) {
-        self.data.zeroize();
+        // Vec::zeroize also clears its length. Keep all fixed-capacity slots alive.
+        self.data.as_mut_slice().zeroize();
         self.head = 0;
         self.len = 0;
         self.last_activity = Instant::now();
@@ -205,7 +210,7 @@ impl Default for SecureRingBuffer {
 
 impl Drop for SecureRingBuffer {
     fn drop(&mut self) {
-        self.data.zeroize();
+        self.data.as_mut_slice().zeroize();
         self.unlock_memory();
     }
 }
@@ -289,6 +294,13 @@ mod tests {
         assert_eq!(buf.len(), 0);
         for &ch in &buf.data {
             assert_eq!(ch, '\0');
+        }
+        assert_eq!(buf.data.len(), 5);
+        for _ in 0..100 {
+            buf.push('다');
+            assert_eq!(buf.as_string(), "다");
+            buf.clear();
+            assert_eq!(buf.data.len(), 5);
         }
     }
 }

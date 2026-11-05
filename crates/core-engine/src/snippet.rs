@@ -44,11 +44,24 @@ pub struct Snippet {
     pub content: SnippetContent,
     pub trigger_mode: TriggerMode,
     pub enabled: bool,
+    #[serde(default = "common_profile")]
+    pub profile: String,
+    #[serde(default)]
+    pub template: bool,
+}
+
+pub fn common_profile() -> String {
+    "common".into()
 }
 
 impl Snippet {
     /// Creates a plain text snippet with immediate trigger mode.
-    pub fn plain_text(id: impl Into<String>, name: impl Into<String>, keyword: impl Into<String>, text: impl Into<String>) -> Self {
+    pub fn plain_text(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        keyword: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
@@ -56,6 +69,8 @@ impl Snippet {
             content: SnippetContent::PlainText(text.into()),
             trigger_mode: TriggerMode::Immediate,
             enabled: true,
+            profile: common_profile(),
+            template: false,
         }
     }
 
@@ -74,6 +89,8 @@ impl Snippet {
             content: SnippetContent::PlainText(text.into()),
             trigger_mode,
             enabled: true,
+            profile: common_profile(),
+            template: false,
         }
     }
 
@@ -95,6 +112,8 @@ impl Snippet {
             },
             trigger_mode: TriggerMode::Immediate,
             enabled: true,
+            profile: common_profile(),
+            template: false,
         }
     }
 }

@@ -1,5 +1,5 @@
 use crate::snippet::{Snippet, TriggerMode};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 /// Result of a successful snippet keyword match.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,168 +14,141 @@ pub struct MatchResult {
 #[derive(Debug, Default)]
 struct TrieNode {
     children: HashMap<char, TrieNode>,
-    snippets: Vec<Snippet>,
+    snippets: Vec<Arc<Snippet>>,
 }
 
 /// High-speed snippet matcher using a reverse prefix Trie.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct SnippetMatcher {
-    root: TrieNode,
-    snippets_by_id: HashMap<String, Snippet>,
+    root: Arc<TrieNode>,
+    snippets_by_id: Arc<HashMap<String, Arc<Snippet>>>,
 }
 
 impl SnippetMatcher {
     /// Creates a new empty `SnippetMatcher`.
     pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn revision(&self) -> usize {
+        Arc::as_ptr(&self.root) as usize
+    }
+    pub fn from_snippets(snippets: impl IntoIterator<Item = Snippet>) -> Self {
+        let by_id: HashMap<_, _> = snippets
+            .into_iter()
+            .map(|s| (s.id.clone(), Arc::new(s)))
+            .collect();
+        let mut root = TrieNode::default();
+        for snippet in by_id
+            .values()
+            .filter(|s| s.enabled && !s.keyword.is_empty())
+        {
+            let korean = crate::korean::render(&snippet.keyword);
+            for keyword in std::iter::once(snippet.keyword.as_str())
+                .chain((korean != snippet.keyword).then_some(korean.as_str()))
+            {
+                let mut node = &mut root;
+                for ch in keyword.chars().rev() {
+                    node = node.children.entry(ch).or_default();
+                }
+                node.snippets.push(Arc::clone(snippet));
+            }
+        }
+        fn sort(node: &mut TrieNode) {
+            node.snippets.sort_by(|a, b| a.id.cmp(&b.id));
+            for child in node.children.values_mut() {
+                sort(child);
+            }
+        }
+        sort(&mut root);
         Self {
-            root: TrieNode::default(),
-            snippets_by_id: HashMap::new(),
+            root: Arc::new(root),
+            snippets_by_id: Arc::new(by_id),
         }
     }
-
-    /// Adds or replaces a snippet in the matcher.
     pub fn add_snippet(&mut self, snippet: Snippet) {
-        if !snippet.enabled {
-            self.remove_snippet(&snippet.id);
-            return;
-        }
-
-        // Remove old entry with same id if exists
-        self.remove_snippet(&snippet.id);
-
-        self.snippets_by_id.insert(snippet.id.clone(), snippet.clone());
-        self.rebuild_trie();
+        let mut rows: Vec<_> = self
+            .list_snippets()
+            .into_iter()
+            .filter(|s| s.id != snippet.id)
+            .cloned()
+            .collect();
+        rows.push(snippet);
+        *self = Self::from_snippets(rows);
     }
-
-    /// Removes a snippet by ID.
-    pub fn remove_snippet(&mut self, snippet_id: &str) -> bool {
-        if self.snippets_by_id.remove(snippet_id).is_some() {
-            self.rebuild_trie();
-            true
-        } else {
-            false
+    pub fn remove_snippet(&mut self, id: &str) -> bool {
+        let exists = self.snippets_by_id.contains_key(id);
+        if exists {
+            *self = Self::from_snippets(
+                self.list_snippets()
+                    .into_iter()
+                    .filter(|s| s.id != id)
+                    .cloned(),
+            );
         }
+        exists
     }
-
-    /// Rebuilds the reverse Trie from the registered snippets.
-    fn rebuild_trie(&mut self) {
-        self.root = TrieNode::default();
-
-        for snippet in self.snippets_by_id.values() {
-            if !snippet.enabled || snippet.keyword.is_empty() {
-                continue;
-            }
-
-            // Insert reversed keyword
-            let mut curr = &mut self.root;
-            for ch in snippet.keyword.chars().rev() {
-                curr = curr.children.entry(ch).or_default();
-            }
-            curr.snippets.push(snippet.clone());
-        }
-    }
-
-    /// Returns all registered snippets.
     pub fn list_snippets(&self) -> Vec<&Snippet> {
-        self.snippets_by_id.values().collect()
+        self.snippets_by_id.values().map(AsRef::as_ref).collect()
     }
-
+    pub fn get(&self, id: &str) -> Option<&Snippet> {
+        self.snippets_by_id.get(id).map(AsRef::as_ref)
+    }
     /// Checks if a character is a standard delimiter for Delimiter trigger mode.
     fn is_standard_delimiter(ch: char) -> bool {
-        matches!(ch, ' ' | '\t' | '\r' | '\n' | ',' | '.' | ';' | ':' | '!' | '?' | '/' | '-')
+        matches!(
+            ch,
+            ' ' | '\t' | '\r' | '\n' | ',' | '.' | ';' | ':' | '!' | '?' | '/' | '-'
+        )
     }
 
     /// Searches the suffix of the given buffer string for matching snippet keywords.
     /// Returns the best matching snippet and the required backspace count.
     pub fn find_match(&self, buffer: &str) -> Option<MatchResult> {
-        if buffer.is_empty() || self.snippets_by_id.is_empty() {
-            return None;
-        }
-
-        let chars: Vec<char> = buffer.chars().collect();
-        let total_len = chars.len();
-
-        let mut best_match: Option<MatchResult> = None;
-
-        // Case 1: Check Immediate trigger (buffer suffix matches keyword directly)
-        if let Some(m) = self.match_suffix_at(&chars, total_len, TriggerMode::Immediate, 0) {
-            best_match = Some(m);
-        }
-
-        // Case 2: Check Trailing Triggers (Space, Enter, Tab, Delimiter)
-        if total_len >= 2 {
-            let last_char = chars[total_len - 1];
-
-            // Space trigger
-            if last_char == ' ' {
-                if let Some(m) = self.match_suffix_at(&chars, total_len - 1, TriggerMode::Space, 1) {
-                    if best_match.as_ref().map_or(true, |b| m.backspace_count > b.backspace_count) {
-                        best_match = Some(m);
-                    }
-                }
-            }
-
-            // Enter trigger
-            if last_char == '\n' || last_char == '\r' {
-                if let Some(m) = self.match_suffix_at(&chars, total_len - 1, TriggerMode::Enter, 1) {
-                    if best_match.as_ref().map_or(true, |b| m.backspace_count > b.backspace_count) {
-                        best_match = Some(m);
-                    }
-                }
-            }
-
-            // Tab trigger
-            if last_char == '\t' {
-                if let Some(m) = self.match_suffix_at(&chars, total_len - 1, TriggerMode::Tab, 1) {
-                    if best_match.as_ref().map_or(true, |b| m.backspace_count > b.backspace_count) {
-                        best_match = Some(m);
-                    }
-                }
-            }
-
-            // Delimiter trigger
-            if Self::is_standard_delimiter(last_char) {
-                if let Some(m) = self.match_suffix_at(&chars, total_len - 1, TriggerMode::Delimiter, 1) {
-                    if best_match.as_ref().map_or(true, |b| m.backspace_count > b.backspace_count) {
-                        best_match = Some(m);
-                    }
-                }
-            }
-        }
-
-        best_match
+        self.find_match_in_profile(buffer, "common")
     }
-
-    /// Walks backwards from `end_idx` in `chars` against the reverse Trie.
-    fn match_suffix_at(
-        &self,
-        chars: &[char],
-        end_idx: usize,
-        expected_mode: TriggerMode,
-        extra_backspaces: usize,
-    ) -> Option<MatchResult> {
-        let mut curr = &self.root;
-        let mut matched_snippet: Option<(Snippet, usize)> = None;
-
-        for offset in 0..end_idx {
-            let ch = chars[end_idx - 1 - offset];
-            if let Some(next_node) = curr.children.get(&ch) {
-                curr = next_node;
-                // Check if any snippet terminating here matches the required mode
-                for s in &curr.snippets {
-                    if s.trigger_mode == expected_mode {
-                        let kw_len = s.keyword.chars().count();
-                        matched_snippet = Some((s.clone(), kw_len + extra_backspaces));
+    pub fn find_match_in_profile(&self, buffer: &str, profile: &str) -> Option<MatchResult> {
+        let last = buffer.chars().next_back()?;
+        let mut best: Option<(&Snippet, usize)> = None;
+        for skip in [false, true] {
+            if skip && !Self::is_standard_delimiter(last) {
+                continue;
+            }
+            let mut node = self.root.as_ref();
+            let mut chars = buffer.chars().rev();
+            if skip {
+                chars.next();
+            }
+            for (offset, ch) in chars.enumerate() {
+                let Some(next) = node.children.get(&ch) else {
+                    break;
+                };
+                node = next;
+                for snippet in &node.snippets {
+                    let trigger = match (&snippet.trigger_mode, skip) {
+                        (TriggerMode::Immediate, false) => true,
+                        (TriggerMode::Space, true) => last == ' ',
+                        (TriggerMode::Enter, true) => last == '\n' || last == '\r',
+                        (TriggerMode::Tab, true) => last == '\t',
+                        (TriggerMode::Delimiter, true) => true,
+                        _ => false,
+                    };
+                    if trigger && (snippet.profile == "common" || snippet.profile == profile) {
+                        let length = offset + 1 + usize::from(skip);
+                        if best.as_ref().map_or(true, |(s, n)| {
+                            length > *n
+                                || (length == *n
+                                    && s.profile == "common"
+                                    && snippet.profile != "common")
+                        }) {
+                            best = Some((snippet, length));
+                        }
                     }
                 }
-            } else {
-                break;
             }
         }
-
-        matched_snippet.map(|(snippet, backspace_count)| MatchResult {
-            snippet,
-            backspace_count,
+        best.map(|(s, n)| MatchResult {
+            snippet: s.clone(),
+            backspace_count: n,
         })
     }
 }
@@ -184,11 +157,66 @@ impl SnippetMatcher {
 mod tests {
     use super::*;
     use crate::snippet::SnippetContent;
+    #[test]
+    fn korean_alias_uses_rendered_length_and_preserves_trigger_mode() {
+        let mut matcher = SnippetMatcher::from_snippets([
+            Snippet::plain_text("1", "alias", "#rksk", "result"),
+            Snippet::plain_text("2", "digits", "#123", "digits"),
+        ]);
+        assert_eq!(matcher.find_match("#rksk").unwrap().backspace_count, 5);
+        assert_eq!(matcher.find_match("#가나").unwrap().backspace_count, 3);
+        assert!(matcher.find_match("#123").is_some());
+        let mut spaced = matcher.get("1").unwrap().clone();
+        spaced.trigger_mode = TriggerMode::Space;
+        matcher.add_snippet(spaced);
+        assert!(matcher.find_match("#가나").is_none());
+        assert_eq!(matcher.find_match("#가나 ").unwrap().backspace_count, 4);
+        assert_eq!(matcher.find_match("#rksk ").unwrap().backspace_count, 6);
+    }
+    #[test]
+    fn immutable_snapshots_and_profile_scope_preserve_matching() {
+        let common = Snippet::plain_text("1", "공통", ":common", "공통");
+        let mut work = Snippet::plain_text("2", "업무", ":same", "업무");
+        work.profile = "work".into();
+        let mut personal = work.clone();
+        personal.id = "3".into();
+        personal.profile = "personal".into();
+        let mut matcher = SnippetMatcher::from_snippets([common, work, personal]);
+        let old = matcher.clone();
+        assert_eq!(
+            matcher
+                .find_match_in_profile(":same", "work")
+                .unwrap()
+                .snippet
+                .id,
+            "2"
+        );
+        assert_eq!(
+            matcher
+                .find_match_in_profile(":same", "personal")
+                .unwrap()
+                .snippet
+                .id,
+            "3"
+        );
+        assert!(matcher.find_match(":same").is_none());
+        matcher.remove_snippet("1");
+        assert!(old.find_match(":common").is_some());
+        assert!(matcher.find_match(":common").is_none());
+        let legacy: Snippet = serde_json::from_str(r#"{"id":"old","name":"old","keyword":":old","content":{"PlainText":"문구"},"trigger_mode":"Space","enabled":true}"#).unwrap();
+        assert_eq!(legacy.profile, "common");
+        assert!(!legacy.template);
+    }
 
     #[test]
     fn test_immediate_match() {
         let mut matcher = SnippetMatcher::new();
-        matcher.add_snippet(Snippet::plain_text("1", "Email", ":mail", "user@example.com"));
+        matcher.add_snippet(Snippet::plain_text(
+            "1",
+            "Email",
+            ":mail",
+            "user@example.com",
+        ));
 
         assert_eq!(matcher.find_match("hello :mai"), None);
 
@@ -216,7 +244,9 @@ mod tests {
         assert_eq!(matcher.find_match("testing br"), None);
 
         // Typing space after 'br' triggers!
-        let match_res = matcher.find_match("testing br ").expect("Should match on space");
+        let match_res = matcher
+            .find_match("testing br ")
+            .expect("Should match on space");
         assert_eq!(match_res.snippet.id, "2");
         assert_eq!(match_res.backspace_count, 3); // "br".len() + 1 (' ')
     }
@@ -233,10 +263,14 @@ mod tests {
         ));
 
         assert_eq!(matcher.find_match("hey omw"), None);
-        let match_dot = matcher.find_match("hey omw.").expect("Should match on period");
+        let match_dot = matcher
+            .find_match("hey omw.")
+            .expect("Should match on period");
         assert_eq!(match_dot.backspace_count, 4); // "omw" (3) + "." (1)
 
-        let match_comma = matcher.find_match("hey omw,").expect("Should match on comma");
+        let match_comma = matcher
+            .find_match("hey omw,")
+            .expect("Should match on comma");
         assert_eq!(match_comma.backspace_count, 4);
     }
 
@@ -246,7 +280,9 @@ mod tests {
         matcher.add_snippet(Snippet::plain_text("1", "Short", ":d", "short"));
         matcher.add_snippet(Snippet::plain_text("2", "Long", ":date", "2026-11-04"));
 
-        let res = matcher.find_match("today is :date").expect("Should match :date");
+        let res = matcher
+            .find_match("today is :date")
+            .expect("Should match :date");
         assert_eq!(res.snippet.id, "2");
         assert_eq!(res.backspace_count, 5);
     }
@@ -254,10 +290,28 @@ mod tests {
     #[test]
     fn test_remove_snippet() {
         let mut matcher = SnippetMatcher::new();
-        matcher.add_snippet(Snippet::plain_text("1", "Email", ":mail", "user@example.com"));
+        matcher.add_snippet(Snippet::plain_text(
+            "1",
+            "Email",
+            ":mail",
+            "user@example.com",
+        ));
         assert!(matcher.find_match(":mail").is_some());
 
         assert!(matcher.remove_snippet("1"));
         assert!(matcher.find_match(":mail").is_none());
+    }
+
+    #[test]
+    fn disabled_snippets_remain_editable_and_can_be_enabled_again() {
+        let mut matcher = SnippetMatcher::new();
+        let mut snippet = Snippet::plain_text("1", "Signature", ":sig", "감사합니다");
+        snippet.enabled = false;
+        matcher.add_snippet(snippet.clone());
+        assert_eq!(matcher.list_snippets().len(), 1);
+        assert!(matcher.find_match(":sig").is_none());
+        snippet.enabled = true;
+        matcher.add_snippet(snippet);
+        assert!(matcher.find_match(":sig").is_some());
     }
 }

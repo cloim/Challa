@@ -1,10 +1,14 @@
 pub mod events;
 pub mod injector;
+pub mod interactive;
 pub mod keyboard_hook;
+pub mod korean;
 pub mod matcher;
 pub mod privacy_guard;
+pub mod profiles;
 pub mod ring_buffer;
 pub mod snippet;
+pub mod template;
 
 pub use events::{EngineEvent, KeyStroke};
 pub use injector::TextInjector;

@@ -50,4 +50,11 @@ pub enum EngineEvent {
     KeywordMatched(String),
     PasswordFieldActive,
     BufferCleared,
+    InteractiveExpansion {
+        snippet_id: String,
+        target: (usize, usize),
+        expected: String,
+        revision: u64,
+    },
+    StatusChanged,
 }
