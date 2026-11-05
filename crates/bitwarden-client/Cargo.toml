@@ -6,10 +6,15 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-zeroize.workspace = true
+zeroize = { workspace = true, features = ["serde"] }
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+totp-rs = { version = "5.7", features = ["otpauth", "zeroize"] }
+url = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_System_RemoteDesktop"] }
