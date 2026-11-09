@@ -346,9 +346,10 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 window.set_icon(tauri::include_image!("icons/icon.png"))?;
             }
-            let data_directory = test_directory
-                .clone()
-                .unwrap_or(app.path().app_local_data_dir()?);
+            let data_directory = match test_directory.clone() {
+                Some(directory) => directory,
+                None => app.path().home_dir()?.join(".config").join("challa"),
+            };
             if !data_directory.is_absolute() {
                 return Err("앱 데이터 경로는 절대 경로여야 합니다".into());
             }

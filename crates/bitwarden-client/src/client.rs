@@ -258,12 +258,6 @@ pub struct BitwardenClient {
 }
 
 impl BitwardenClient {
-    pub fn new() -> Self {
-        let base = std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        Self::with_profile(base.join("com.challa.app/bitwarden-cli"))
-    }
     pub fn with_profile(profile: PathBuf) -> Self {
         let cli = Cli::discover().map(|cli| Arc::new(cli) as Arc<dyn CliRunner>);
         let status = if cli.is_some() {
@@ -633,11 +627,6 @@ impl BitwardenClient {
         }
     }
 }
-impl Default for BitwardenClient {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 pub fn valid_item_id(id: &str) -> bool {
     id.len() == 36
@@ -825,7 +814,7 @@ mod tests {
                 Ok(Zeroizing::new(Vec::new()))
             }
         }
-        let mut client = BitwardenClient::new();
+        let mut client = BitwardenClient::with_profile("isolated-test-profile".into());
         client.cli = Some(Arc::new(CheckInput));
         client
             .login(
