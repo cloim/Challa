@@ -22,7 +22,7 @@ Windows용 텍스트 익스팬더입니다. 영문 단축어를 한글, 여러 �
 - 편집기의 내용 유형에서 `빈칸 템플릿`을 선택하고 `{{고객명}}`, `{{날짜}}`처럼 작성합니다. 단축어 실행 또는 빠른 호출에서 값을 채워 완성 문구를 확인합니다. 날짜 빈칸에는 오늘 날짜를 채웁니다. 일반 텍스트의 중괄호는 원문대로 입력합니다.
 - 공통 스니펫은 모든 프로필에서 사용합니다. 업무와 개인 프로필은 작업 프로필 설정과 트레이에서 선택합니다. `outlook.exe`와 같은 실행 파일 이름에 자동 선택 규칙을 지정할 수 있습니다. 앱 규칙이 기본 프로필보다 우선하며 웹사이트별 권한과는 별도입니다.
 - 원래 입력창, 프로세스와 포커스를 다시 확인한 뒤 입력합니다. 빠른 호출창에서 다른 창으로 이동하면 요청을 취소합니다. 보관함이 잠기거나 엔진이 정지하면 진행 중 입력도 취소합니다. 요청 유효 시간은 5분입니다.
-- 창을 닫으면 트레이에서 계속 실행합니다. 트레이 메뉴에서 관리 창 열기, 프로필 선택, 일시 정지와 재개, 보관함 잠금과 종료를 사용할 수 있습니다.
+- 창을 닫으면 트레이에서 계속 실행합니다. 트레이 메뉴에서 업데이트 확인, 열기, 프로필(업무와 개인), 일시 정지 / 재개, 보관함 잠금과 종료를 사용할 수 있습니다.
 
 스니펫의 프로필과 템플릿 설정은 기존 `snippets.dpapi`에 함께 저장합니다. 이전 스니펫은 공통 프로필과 일반 텍스트로 읽습니다. 프로필 규칙은 같은 데이터 폴더의 `settings.dpapi`에 Windows DPAPI로 암호화합니다. Bitwarden 참조에는 빈칸 템플릿을 적용하지 않습니다.
 
@@ -59,7 +59,7 @@ Challa의 세션 키와 선택한 필드 값은 Rust 메모리에만 보관합�
 
 Windows 배포용 앱은 처음 실행할 때 자동 실행을 등록합니다. Windows 로그인으로 시작하면 관리 창을 띄우지 않고 트레이에서 실행합니다. `설정`에서 자동 실행과 닫기 버튼의 트레이 동작을 변경할 수 있습니다. 개발 빌드와 격리된 테스트는 Windows 자동 실행 등록을 변경하지 않습니다.
 
-트레이 아이콘을 왼쪽 클릭하면 관리 창을 복원합니다. 오른쪽 메뉴에서 프로필 변경, 엔진 정지와 재개, 보관함 잠금과 앱 종료를 실행합니다. 닫기 버튼은 기본적으로 창을 트레이에 숨깁니다. 완전히 종료하려면 트레이 메뉴의 `종료`를 선택합니다. 트레이 생성에 실패하면 창을 숨기지 않도록 처리합니다.
+트레이 아이콘을 왼쪽 클릭하면 관리 창을 복원합니다. 오른쪽 메뉴에서 업데이트 확인, 열기, 프로필 변경, 엔진 정지와 재개, 보관함 잠금과 앱 종료를 실행합니다. 닫기 버튼은 기본적으로 창을 트레이에 숨깁니다. 완전히 종료하려면 트레이 메뉴의 `종료`를 선택합니다. 트레이 생성에 실패하면 창을 숨기지 않도록 처리합니다.
 
 Node.js, pnpm, Rust와 Windows WebView2 Runtime이 필요합니다.
 
@@ -70,7 +70,32 @@ cargo build -p challa
 ./target/debug/challa.exe
 ```
 
-배포용 실행 파일은 프론트엔드 빌드 후 `cargo build --release -p challa`로 만듭니다. 결과는 `target/release/challa.exe`입니다. 저장소 파일은 앱의 로컬 데이터 폴더 `snippets.dpapi`에 저장합니다.
+로컬 확인용 release 실행 파일은 프론트엔드 빌드 후 `cargo build --release -p challa`로 만듭니다. 결과는 `target/release/challa.exe`입니다. 배포는 아래 릴리스 스크립트가 만드는 NSIS 설치 파일로만 합니다. 저장소 파일은 앱의 로컬 데이터 폴더 `snippets.dpapi`에 저장합니다.
+
+## 로컬 릴리스 빌드와 배포
+
+GitHub 릴리스에는 NSIS 설치 파일(`Challa_<version>_x64-setup.exe`), 업데이트 서명(`.sig`)과 `latest.json`만 게시합니다. `challa.exe` 실행 파일은 게시하지 않습니다. 로컬 릴리스 스크립트로 버전 일치 확인, Windows 자격 증명 관리자 서명 키 주입, NSIS 인스톨러 번들 빌드, `latest.json` 생성 및 GitHub 릴리스 업로드를 수행합니다.
+
+```powershell
+# 배포 없이 빌드 및 latest.json 산출물 검증만 수행할 때
+uv run python scripts/release.py --dry-run
+
+# 실제 GitHub Release 생성 및 에셋 업로드 수행 시
+uv run python scripts/release.py
+```
+
+### 성공 판단 기준
+1. `Cargo.toml` workspace, `package.json`, `src-tauri/tauri.conf.json` 세 파일의 버전이 일치합니다.
+2. Windows 자격 증명 관리자에 저장된 `challa-signing_key`와 `challa-signing_password`가 정상적으로 로드됩니다.
+3. `pnpm tauri build`가 성공하고 `target/release/bundle/nsis/` 아래에 NSIS 설치 파일(`*.exe`)과 서명 파일(`*.sig`)이 생성됩니다.
+4. `target/release/bundle/latest.json`이 생성되고 플랫폼별 다운로드 URL(`https://github.com/cloim/Challa/releases/download/v<version>/...`)과 서명이 올바르게 기재됩니다.
+5. (실제 배포 시) `gh release create`로 태그와 함께 설치 파일, `.sig`, `latest.json`이 GitHub 릴리스에 업로드됩니다.
+
+### 실패 시 조치
+- **버전 불일치 오류**: `Cargo.toml`(`[workspace.package] version`), `package.json`(`version`), `src-tauri/tauri.conf.json`(`version`)의 버전을 동일하게 맞춥니다.
+- **서명 자격 증명 부재**: `using-credentials` 스킬을 사용하여 Windows 자격 증명 관리자에 `challa-signing_key` 및 `challa-signing_password`를 등록합니다.
+- **바이너리 파일 잠금 오류**: 이미 실행 중인 Challa 인스턴스가 있다면 프로세스를 종료한 뒤 다시 실행합니다.
+- **GitHub CLI(`gh`) 인증 오류**: `gh auth status`를 확인하고 필요 시 `gh auth login`을 실행합니다.
 
 ## 변경 후 검증
 

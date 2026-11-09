@@ -12,9 +12,101 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tauri::{Emitter, Manager, State};
+use tauri::{Emitter, Manager, State, Wry};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_updater::UpdaterExt;
 
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
+static UPDATING: AtomicBool = AtomicBool::new(false);
+
+struct UpdateGuard;
+impl Drop for UpdateGuard {
+    fn drop(&mut self) {
+        UPDATING.store(false, Ordering::SeqCst);
+    }
+}
+
+pub struct TrayProfileMenu {
+    pub work: tauri::menu::CheckMenuItem<Wry>,
+    pub personal: tauri::menu::CheckMenuItem<Wry>,
+}
+
+pub fn update_tray_profile_checked(app: &tauri::AppHandle, active_profile: &str) {
+    if let Some(menu) = app.try_state::<TrayProfileMenu>() {
+        let _ = menu.work.set_checked(active_profile == "work");
+        let _ = menu.personal.set_checked(active_profile == "personal");
+    }
+}
+
+fn trigger_update_check(app: tauri::AppHandle) {
+    if UPDATING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+
+    tauri::async_runtime::spawn(async move {
+        let _guard = UpdateGuard;
+        let updater = match app.updater() {
+            Ok(u) => u,
+            Err(e) => {
+                app.dialog()
+                    .message(format!("업데이트 확인에 실패했어요: {e}"))
+                    .title("Challa 업데이트")
+                    .kind(MessageDialogKind::Error)
+                    .blocking_show();
+                return;
+            }
+        };
+
+        match updater.check().await {
+            Ok(Some(update)) => {
+                let msg = format!(
+                    "새 버전(v{})이 있어요.\n지금 설치하고 앱을 다시 시작할까요?",
+                    update.version
+                );
+                let confirmed = app
+                    .dialog()
+                    .message(msg)
+                    .title("Challa 업데이트")
+                    .kind(MessageDialogKind::Info)
+                    .buttons(MessageDialogButtons::YesNo)
+                    .blocking_show();
+
+                if confirmed {
+                    app.state::<AppState>().bitwarden.lock();
+                    match update.download_and_install(|_, _| {}, || {}).await {
+                        Ok(()) => {
+                            app.request_restart();
+                        }
+                        Err(e) => {
+                            app.dialog()
+                                .message(format!("업데이트 다운로드 및 설치에 실패했어요: {e}"))
+                                .title("Challa 업데이트")
+                                .kind(MessageDialogKind::Error)
+                                .blocking_show();
+                        }
+                    }
+                }
+            }
+            Ok(None) => {
+                app.dialog()
+                    .message("최신 버전입니다.")
+                    .title("Challa 업데이트")
+                    .kind(MessageDialogKind::Info)
+                    .blocking_show();
+            }
+            Err(e) => {
+                app.dialog()
+                    .message(format!("업데이트 확인에 실패했어요: {e}"))
+                    .title("Challa 업데이트")
+                    .kind(MessageDialogKind::Error)
+                    .blocking_show();
+            }
+        }
+    });
+}
 #[derive(Clone)]
 pub struct QuickRequest {
     token: u64,
@@ -99,6 +191,7 @@ pub fn get_productivity_state(state: State<'_, AppState>) -> Result<Productivity
 #[tauri::command]
 pub async fn save_profiles(app: tauri::AppHandle, settings: ProfileSettings) -> Result<(), String> {
     settings.validate()?;
+    let active_profile = settings.active_profile.clone();
     let write_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let state = write_app.state::<AppState>();
@@ -113,6 +206,7 @@ pub async fn save_profiles(app: tauri::AppHandle, settings: ProfileSettings) -> 
     })
     .await
     .map_err(|e| e.to_string())??;
+    update_tray_profile_checked(&app, &active_profile);
     let _ = app.emit("library-changed", ());
     Ok(())
 }
@@ -497,6 +591,11 @@ pub fn setup(app: tauri::AppHandle, receiver: Receiver<EngineEvent>) -> anyhow::
                 if let Ok(mut product) = snapshot(&state) {
                     product.application = application.clone();
                     previous = serialized;
+                    let active_profile = settings
+                        .as_ref()
+                        .map(|s| s.active_profile.as_str())
+                        .unwrap_or("work");
+                    update_tray_profile_checked(&app, active_profile);
                     let _ = app.emit("engine-state", &engine);
                     let _ = app.emit("productivity-state", &product);
                     if revision != previous_library {
@@ -512,16 +611,45 @@ pub fn setup(app: tauri::AppHandle, receiver: Receiver<EngineEvent>) -> anyhow::
 }
 fn setup_tray(app: &tauri::AppHandle) -> anyhow::Result<()> {
     use tauri::{
-        menu::{Menu, MenuItem},
+        menu::{CheckMenuItem, Menu, MenuItem, Submenu},
         tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     };
-    let show = MenuItem::with_id(app, "show", "스니펫 관리", true, None::<&str>)?;
-    let work = MenuItem::with_id(app, "work", "업무 프로필", true, None::<&str>)?;
-    let personal = MenuItem::with_id(app, "personal", "개인 프로필", true, None::<&str>)?;
+    let initial_profile = app
+        .state::<AppState>()
+        .settings
+        .lock()
+        .map(|s| s.active_profile.clone())
+        .unwrap_or_else(|_| "work".into());
+
+    let update = MenuItem::with_id(app, "update", "업데이트", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, "show", "열기", true, None::<&str>)?;
+    let work = CheckMenuItem::with_id(
+        app,
+        "work",
+        "업무",
+        true,
+        initial_profile == "work",
+        None::<&str>,
+    )?;
+    let personal = CheckMenuItem::with_id(
+        app,
+        "personal",
+        "개인",
+        true,
+        initial_profile == "personal",
+        None::<&str>,
+    )?;
+    let profile = Submenu::with_items(app, "프로필", true, &[&work, &personal])?;
     let pause = MenuItem::with_id(app, "pause", "일시 정지 / 재개", true, None::<&str>)?;
     let lock = MenuItem::with_id(app, "lock", "보관함 잠금", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "종료", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &work, &personal, &pause, &lock, &quit])?;
+    let menu = Menu::with_items(app, &[&update, &show, &profile, &pause, &lock, &quit])?;
+
+    app.manage(TrayProfileMenu {
+        work: work.clone(),
+        personal: personal.clone(),
+    });
+
     TrayIconBuilder::with_id("challa-tray")
         .icon(tauri::include_image!("icons/icon.png"))
         .tooltip("Challa")
@@ -542,6 +670,9 @@ fn setup_tray(app: &tauri::AppHandle) -> anyhow::Result<()> {
         .on_menu_event(|app, event| {
             let state = app.state::<AppState>();
             match event.id.as_ref() {
+                "update" => {
+                    trigger_update_check(app.clone());
+                }
                 "show" => {
                     crate::desktop::show_main(app);
                 }
@@ -560,7 +691,10 @@ fn setup_tray(app: &tauri::AppHandle) -> anyhow::Result<()> {
                         &state.storage_path.with_file_name("settings.dpapi"),
                         &next,
                     ) {
-                        Ok(()) => *settings = next,
+                        Ok(()) => {
+                            *settings = next.clone();
+                            update_tray_profile_checked(app, &next.active_profile);
+                        }
                         Err(error) => {
                             let _ = app.emit("operation-error", error);
                         }

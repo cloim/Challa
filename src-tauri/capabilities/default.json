@@ -3,5 +3,10 @@
   "identifier": "desktop-events",
   "description": "Allow the two local views to receive application state changes",
   "windows": ["main", "quick"],
-  "permissions": ["core:event:default"]
+  "permissions": [
+    "core:event:default",
+    "updater:default",
+    "dialog:default",
+    "process:default"
+  ]
 }
