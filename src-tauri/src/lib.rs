@@ -126,30 +126,6 @@ fn references(snippets: &[Snippet]) -> Vec<VaultReference> {
         })
         .collect()
 }
-#[cfg(windows)]
-fn secure_desktop_active() -> bool {
-    use windows::Win32::System::StationsAndDesktops::*;
-    unsafe {
-        let Ok(desktop) = OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS)
-        else {
-            return true;
-        };
-        let mut name = [0u16; 64];
-        let mut required = 0;
-        let result = GetUserObjectInformationW(
-            windows::Win32::Foundation::HANDLE(desktop.0),
-            UOI_NAME,
-            Some(name.as_mut_ptr().cast()),
-            (name.len() * 2) as u32,
-            Some(&mut required),
-        );
-        let _ = CloseDesktop(desktop);
-        result.is_err()
-            || String::from_utf16_lossy(
-                &name[..name.iter().position(|c| *c == 0).unwrap_or(name.len())],
-            ) != "Default"
-    }
-}
 #[tauri::command]
 fn get_vault_status(state: State<'_, AppState>) -> VaultInfo {
     state.bitwarden.info()
@@ -378,25 +354,23 @@ pub fn run() {
             let bitwarden = Arc::new(BitwardenClient::with_profile(
                 data_directory.join("bitwarden-cli"),
             ));
-            let weak_vault = Arc::downgrade(&bitwarden);
-            std::thread::spawn(move || {
-                #[cfg(windows)]
-                let mut protected_desktop = false;
-                while let Some(vault) = weak_vault.upgrade() {
-                    #[cfg(windows)]
-                    {
-                        let protected =
-                            challa_bitwarden::windows_session_locked() || secure_desktop_active();
-                        if protected && !protected_desktop {
+            // The vault stays unlocked while the person works and locks when Windows locks.
+            #[cfg(windows)]
+            {
+                let weak_vault = Arc::downgrade(&bitwarden);
+                std::thread::spawn(move || {
+                    let mut session_locked = false;
+                    while let Some(vault) = weak_vault.upgrade() {
+                        let locked = challa_bitwarden::windows_session_locked();
+                        if locked && !session_locked {
                             vault.lock();
                         }
-                        protected_desktop = protected;
+                        session_locked = locked;
+                        drop(vault);
+                        std::thread::sleep(std::time::Duration::from_secs(1));
                     }
-                    vault.expire();
-                    drop(vault);
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                }
-            });
+                });
+            }
             let (snippets, startup_error) = match storage::load(&storage_path) {
                 Ok(Some(snippets)) => (snippets, None),
                 Ok(None) => (

@@ -13,7 +13,7 @@ await context.addInitScript(() => {
   window.isTauri = true;
   const item = { id: "00000000-0000-4000-8000-000000000001", name: "테스트 계정", username: "fixture@example.com", fields: ["Username", "Password", "Totp", "Notes", { Custom: "apiKey" }] };
   window.bwFixture = { status: "Unauthenticated", failLogin: true, failUnlock: true, failSync: false, snippets: [], calls: [] };
-  const info = () => ({ status: window.bwFixture.status, cli_available: true, cached_fields: window.bwFixture.status === "Unlocked" ? window.bwFixture.snippets.length : 0, auto_lock_minutes: 15 });
+  const info = () => ({ status: window.bwFixture.status, cli_available: true, cached_fields: window.bwFixture.status === "Unlocked" ? window.bwFixture.snippets.length : 0 });
   let callback = 0;
   window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
   window.__TAURI_INTERNALS__ = { transformCallback: () => ++callback, unregisterCallback() {}, invoke: async (command, args) => {

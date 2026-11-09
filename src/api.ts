@@ -3,7 +3,7 @@ export type Trigger = "Immediate" | "Space" | "Enter" | "Tab" | "Delimiter";
 export type VaultField = "Username" | "Password" | "Totp" | "Notes" | { Custom: string };
 export interface VaultReference { item_id: string; field: VaultField }
 export interface Snippet { id: string; name: string; keyword: string; content: { PlainText: string } | { BitwardenRef: VaultReference }; trigger_mode: Trigger; enabled: boolean; profile?: string; template?: boolean }
-export interface VaultInfo { status: "Unavailable" | "Unauthenticated" | "Locked" | "Unlocked"; cli_available: boolean; cached_fields: number; auto_lock_minutes: number }
+export interface VaultInfo { status: "Unavailable" | "Unauthenticated" | "Locked" | "Unlocked"; cli_available: boolean; cached_fields: number }
 export interface VaultItem { id: string; name: string; username: string | null; fields: VaultField[] }
 export const fieldLabel = (field: VaultField) => typeof field === "object" ? field.Custom : ({ Username: "사용자 이름", Password: "비밀번호", Totp: "일회용 코드 (TOTP)", Notes: "보안 메모" })[field];
 export const vaultLabels: Record<VaultInfo["status"], string> = { Unavailable: "CLI 설치 필요", Unauthenticated: "로그인 필요", Locked: "잠김", Unlocked: "잠금 해제됨" };
@@ -29,7 +29,7 @@ export async function deleteSnippet(id: string): Promise<void> {
 }
 export async function pauseEngine(paused: boolean): Promise<void> { if (desktop) await invoke("set_engine_paused", { paused }); }
 export async function clearBuffer(): Promise<void> { if (desktop) await invoke("clear_buffer"); }
-const previewVault: VaultInfo = { status: "Unauthenticated", cli_available: false, cached_fields: 0, auto_lock_minutes: 15 };
+const previewVault: VaultInfo = { status: "Unauthenticated", cli_available: false, cached_fields: 0 };
 export async function vaultInfo(inspect = false): Promise<VaultInfo> { return desktop ? invoke(inspect ? "inspect_vault" : "get_vault_status") : previewVault; }
 export async function loginVault(server: string, clientId: string, clientSecret: string): Promise<VaultInfo> { return invoke("login_vault", { server, clientId, clientSecret }); }
 export async function unlockVault(password: string): Promise<VaultInfo> { return invoke("unlock_vault", { password }); }

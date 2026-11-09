@@ -17,7 +17,6 @@ use std::{
 use totp_rs::{Algorithm, Secret, TOTP};
 use zeroize::Zeroizing;
 
-const IDLE: Duration = Duration::from_secs(15 * 60);
 const MAX_OUTPUT: u64 = 16 * 1024 * 1024;
 
 struct Cli {
@@ -245,7 +244,6 @@ struct Session {
     key: Zeroizing<String>,
     fields: HashMap<VaultReference, Cached>,
     summaries: Option<Vec<VaultItemSummary>>,
-    touched: Instant,
 }
 struct State {
     status: VaultStatus,
@@ -285,7 +283,6 @@ impl BitwardenClient {
         }
     }
     pub fn status(&self) -> VaultStatus {
-        self.expire();
         self.state
             .read()
             .map(|s| s.status.clone())
@@ -303,7 +300,6 @@ impl BitwardenClient {
             status,
             cli_available: self.cli.is_some(),
             cached_fields: count,
-            auto_lock_minutes: 15,
         }
     }
     pub fn lock(&self) {
@@ -313,20 +309,6 @@ impl BitwardenClient {
             if state.status == VaultStatus::Unlocked {
                 state.status = VaultStatus::Locked;
             }
-        }
-    }
-    pub fn expire(&self) {
-        let expired = self
-            .state
-            .read()
-            .map(|s| {
-                s.session
-                    .as_ref()
-                    .is_some_and(|s| s.touched.elapsed() >= IDLE)
-            })
-            .unwrap_or(false);
-        if expired {
-            self.lock();
         }
     }
     pub fn generation(&self) -> u64 {
@@ -473,7 +455,6 @@ impl BitwardenClient {
             key,
             fields: HashMap::new(),
             summaries: None,
-            touched: Instant::now(),
         });
         state.status = VaultStatus::Unlocked;
         Ok(())
@@ -486,13 +467,11 @@ impl BitwardenClient {
         Ok(self.info())
     }
     fn lease(&self) -> Result<(u64, Zeroizing<String>), Error> {
-        self.expire();
         let state = self.state.read().map_err(|_| Error::VaultLocked)?;
         let session = state.session.as_ref().ok_or(Error::VaultLocked)?;
         Ok((self.generation(), session.key.clone()))
     }
     pub fn list_items(&self) -> Result<Vec<VaultItemSummary>, Error> {
-        self.expire();
         if let Some(rows) = self
             .state
             .read()
@@ -618,13 +597,11 @@ impl BitwardenClient {
         if let Some(rows) = summaries {
             session.summaries = Some(rows);
         }
-        session.touched = Instant::now();
         Ok(())
     }
     /// Hook-safe: one try_lock and bounded memory work, no process, network or disk.
     pub fn prepared_references(&self) -> Vec<VaultReference> {
-        // Does not refresh idle expiry or generate/read secret values.
-        self.expire();
+        // Does not generate or read secret values.
         self.state
             .read()
             .ok()
@@ -636,14 +613,8 @@ impl BitwardenClient {
             .unwrap_or_default()
     }
     pub fn get_field(&self, item_id: &str, field: &Field) -> Result<SecretFieldValue, Error> {
-        let mut state = self.state.try_write().map_err(|_| Error::VaultLocked)?;
-        let session = state.session.as_mut().ok_or(Error::VaultLocked)?;
-        if session.touched.elapsed() >= IDLE {
-            self.generation.fetch_add(1, Ordering::AcqRel);
-            state.session = None;
-            state.status = VaultStatus::Locked;
-            return Err(Error::VaultLocked);
-        }
+        let state = self.state.try_read().map_err(|_| Error::VaultLocked)?;
+        let session = state.session.as_ref().ok_or(Error::VaultLocked)?;
         let reference = VaultReference {
             item_id: item_id.to_owned(),
             field: field.clone(),
@@ -652,7 +623,6 @@ impl BitwardenClient {
             Cached::Text(text) => text.to_string(),
             Cached::Totp(totp) => totp.generate_current().map_err(|_| Error::FieldNotFound)?,
         };
-        session.touched = Instant::now();
         Ok(SecretFieldValue::new(value))
     }
     pub fn retain_references(&self, references: &[VaultReference]) {
@@ -1024,27 +994,8 @@ mod tests {
             );
         }
         assert_eq!(mock.calls.load(Ordering::Relaxed), 3);
-        let touched = client
-            .state
-            .read()
-            .unwrap()
-            .session
-            .as_ref()
-            .unwrap()
-            .touched;
         let epoch = client.generation();
         assert_eq!(client.prepared_references(), vec![reference()]);
-        assert_eq!(
-            client
-                .state
-                .read()
-                .unwrap()
-                .session
-                .as_ref()
-                .unwrap()
-                .touched,
-            touched
-        );
         assert_eq!(client.generation(), epoch);
         let generation = client.generation();
         client.lock();
@@ -1081,7 +1032,7 @@ mod tests {
         assert_eq!(client.info().cached_fields, 0);
     }
     #[test]
-    fn expiry_wipes_the_session_and_disabling_a_reference_removes_its_value() {
+    fn disabling_a_reference_removes_its_value_and_keeps_the_session_unlocked() {
         let (client, _) = client(
             vec![
                 (
@@ -1096,16 +1047,11 @@ mod tests {
         client.prepare(&[reference()]).unwrap();
         client.retain_references(&[]);
         assert_eq!(client.info().cached_fields, 0);
-        client
-            .state
-            .write()
-            .unwrap()
-            .session
-            .as_mut()
-            .unwrap()
-            .touched = Instant::now() - IDLE;
-        assert!(client.get_field(ITEM, &Field::Password).is_err());
-        assert!(client.state.read().unwrap().session.is_none());
+        assert!(matches!(
+            client.get_field(ITEM, &Field::Password),
+            Err(Error::FieldNotFound)
+        ));
+        assert_eq!(client.status(), VaultStatus::Unlocked);
     }
     #[test]
     fn reprompt_items_and_linked_fields_require_explicit_handling() {

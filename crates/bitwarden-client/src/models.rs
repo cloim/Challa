@@ -37,7 +37,6 @@ pub struct VaultInfo {
     pub status: VaultStatus,
     pub cli_available: bool,
     pub cached_fields: usize,
-    pub auto_lock_minutes: u64,
 }
 
 /// Debug and IPC never reveal field contents. The allocation is wiped on drop.

@@ -32,7 +32,7 @@
         case "save_profiles": f.product.settings = args.settings; f.product.effective_profile = args.settings.active_profile; f.emit("productivity-state", structuredClone(f.product)); return;
         case "set_engine_paused": f.engine.paused = args.paused; f.emit("engine-state", structuredClone(f.engine)); return;
         case "clear_buffer": return;
-        case "get_vault_status": return { status: "Locked", cli_available: true, cached_fields: 0, auto_lock_minutes: 15 };
+        case "get_vault_status": return { status: "Locked", cli_available: true, cached_fields: 0 };
         default: throw Error(`Unsupported fixture command: ${command}`);
       }
     },
