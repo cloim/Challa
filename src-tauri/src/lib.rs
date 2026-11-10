@@ -10,9 +10,11 @@ use tauri::{Manager, State};
 
 pub struct AppState {
     hook: Mutex<Option<KeyboardHookHandle>>,
+    engine_error: Mutex<Option<String>>,
+    engine_events: std::sync::mpsc::Sender<challa_core::EngineEvent>,
     settings: Mutex<challa_core::profiles::ProfileSettings>,
     profiles: Arc<challa_core::profiles::ProfileContext>,
-    privacy: Arc<challa_core::WindowsPrivacyGuard>,
+    privacy: Mutex<Arc<challa_core::WindowsPrivacyGuard>>,
     quick: Mutex<Option<productivity::QuickRequest>>,
     shortcut_error: Mutex<Option<String>>,
     matcher: Arc<Mutex<SnippetMatcher>>,
@@ -35,12 +37,60 @@ fn get_engine_status(state: State<'_, AppState>) -> Result<EngineStatus, String>
         active: hook.as_ref().is_some_and(|hook| hook.is_active()),
         paused: hook.as_ref().is_some_and(|hook| hook.is_paused()),
         vault: format!("{:?}", state.bitwarden.status()),
-        error: state.startup_error.clone().or_else(|| {
-            hook.as_ref()
-                .and_then(|hook| hook.recent_error_message())
-                .map(str::to_owned)
-        }),
+        error: state
+            .startup_error
+            .clone()
+            .or_else(|| state.engine_error.lock().ok().and_then(|e| e.clone()))
+            .or_else(|| {
+                hook.as_ref()
+                    .and_then(|hook| hook.recent_error_message())
+                    .map(str::to_owned)
+            }),
     })
+}
+fn recover_input_engine(state: &AppState, preserve_pause: bool) -> Result<(), String> {
+    let mut slot = state
+        .hook
+        .try_lock()
+        .map_err(|_| "입력 엔진을 복구하고 있어요. 잠시 후 다시 시도해 주세요".to_owned())?;
+    let paused = preserve_pause && slot.as_ref().is_some_and(|h| h.is_paused());
+    if let Some(mut hook) = slot.take() {
+        hook.stop();
+    }
+    // UI Automation providers can stall independently of the keyboard hook.
+    // Replace their monitor as well so recovery can clear stale focus state.
+    let privacy = Arc::new(challa_core::WindowsPrivacyGuard::new());
+    *state.privacy.lock().map_err(|e| e.to_string())? = Arc::clone(&privacy);
+    match KeyboardHook::new()
+        .with_matcher(Arc::clone(&state.matcher))
+        .with_bitwarden(Arc::clone(&state.bitwarden))
+        .with_privacy_guard(privacy)
+        .with_profiles(Arc::clone(&state.profiles))
+        .with_event_sender(state.engine_events.clone())
+        .start()
+    {
+        Ok(hook) => {
+            hook.set_paused(paused);
+            *slot = Some(hook);
+            *state.engine_error.lock().map_err(|e| e.to_string())? = None;
+            Ok(())
+        }
+        Err(error) => {
+            let message = format!("입력 엔진 복구 오류: {error}");
+            *state.engine_error.lock().map_err(|e| e.to_string())? = Some(message.clone());
+            Err(message)
+        }
+    }
+}
+#[tauri::command]
+async fn recover_engine(app: tauri::AppHandle) -> Result<EngineStatus, String> {
+    productivity::dismiss(&app, false);
+    tauri::async_runtime::spawn_blocking(move || {
+        recover_input_engine(&app.state::<AppState>(), false)?;
+        get_engine_status(app.state::<AppState>())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 #[tauri::command]
 fn set_engine_paused(state: State<'_, AppState>, paused: bool) -> Result<(), String> {
@@ -337,6 +387,7 @@ pub fn run() {
             sync_vault,
             get_engine_status,
             set_engine_paused,
+            recover_engine,
             clear_buffer,
             list_snippets,
             add_snippet,
@@ -358,23 +409,6 @@ pub fn run() {
             let bitwarden = Arc::new(BitwardenClient::with_profile(
                 data_directory.join("bitwarden-cli"),
             ));
-            // The vault stays unlocked while the person works and locks when Windows locks.
-            #[cfg(windows)]
-            {
-                let weak_vault = Arc::downgrade(&bitwarden);
-                std::thread::spawn(move || {
-                    let mut session_locked = false;
-                    while let Some(vault) = weak_vault.upgrade() {
-                        let locked = challa_bitwarden::windows_session_locked();
-                        if locked && !session_locked {
-                            vault.lock();
-                        }
-                        session_locked = locked;
-                        drop(vault);
-                        std::thread::sleep(std::time::Duration::from_secs(1));
-                    }
-                });
-            }
             let (snippets, startup_error) = match storage::load(&storage_path) {
                 Ok(Some(snippets)) => (snippets, None),
                 Ok(None) => (
@@ -410,7 +444,7 @@ pub fn run() {
                 .with_bitwarden(Arc::clone(&bitwarden))
                 .with_privacy_guard(privacy.clone())
                 .with_profiles(Arc::clone(&profiles))
-                .with_event_sender(events_tx)
+                .with_event_sender(events_tx.clone())
                 .start()
             {
                 Ok(hook) => (Some(hook), None),
@@ -419,16 +453,84 @@ pub fn run() {
             app.manage(AppState {
                 settings: Mutex::new(settings),
                 profiles,
-                privacy,
+                privacy: Mutex::new(privacy),
                 quick: Mutex::new(None),
                 shortcut_error: Mutex::new(None),
                 hook: Mutex::new(hook),
+                engine_error: Mutex::new(hook_error),
+                engine_events: events_tx,
                 matcher,
                 bitwarden,
                 changes: Arc::new(Mutex::new(())),
                 storage_path,
-                startup_error: startup_error.or(hook_error),
+                startup_error,
             });
+            #[cfg(windows)]
+            {
+                let session_app = app.handle().clone();
+                std::thread::spawn(move || {
+                    let mut session_locked = false;
+                    loop {
+                        let state = session_app.state::<AppState>();
+                        let locked = challa_bitwarden::windows_session_locked();
+                        if locked && !session_locked {
+                            if let Err(error) = state.bitwarden.suspend_for_system_lock() {
+                                tracing::warn!("Vault session protection failed: {error}");
+                            }
+                            productivity::dismiss(&session_app, false);
+                        } else if !locked && session_locked {
+                            match state.bitwarden.resume_after_system_unlock() {
+                                Ok(true) => {
+                                    let app = session_app.clone();
+                                    std::thread::spawn(move || {
+                                        let state = app.state::<AppState>();
+                                        let result = (|| -> Result<(), String> {
+                                            let _change =
+                                                state.changes.lock().map_err(|e| e.to_string())?;
+                                            let rows: Vec<_> = state
+                                                .matcher
+                                                .lock()
+                                                .map_err(|e| e.to_string())?
+                                                .list_snippets()
+                                                .into_iter()
+                                                .cloned()
+                                                .collect();
+                                            state
+                                                .bitwarden
+                                                .prepare(&references(&rows))
+                                                .map_err(|e| e.to_string())
+                                        })();
+                                        if let Err(error) = result {
+                                            use tauri::Emitter;
+                                            let _ = app.emit(
+                                                "operation-error",
+                                                format!(
+                                                    "보관함 필드를 다시 준비해 주세요: {error}"
+                                                ),
+                                            );
+                                        }
+                                    });
+                                }
+                                Ok(false) => {}
+                                Err(error) => {
+                                    use tauri::Emitter;
+                                    let _ = session_app.emit(
+                                        "operation-error",
+                                        format!("보관함 잠금을 다시 해제해 주세요: {error}"),
+                                    );
+                                }
+                            }
+                            if let Err(error) = recover_input_engine(&state, true) {
+                                tracing::warn!(
+                                    "Input engine recovery after unlock failed: {error}"
+                                );
+                            }
+                        }
+                        session_locked = locked;
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                    }
+                });
+            }
             productivity::setup(app.handle().clone(), events_rx)?;
             desktop::show_on_launch(app.handle());
             Ok(())
@@ -459,6 +561,58 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recovery_replaces_hook_clears_buffer_and_preserves_app_state() {
+        let (events, _receiver) = std::sync::mpsc::channel();
+        let matcher = Arc::new(Mutex::new(SnippetMatcher::from_snippets(vec![
+            Snippet::plain_text("test", "test", ":test", "restored"),
+        ])));
+        let state = AppState {
+            hook: Mutex::new(None),
+            engine_error: Mutex::new(Some("fixture startup failure".into())),
+            engine_events: events,
+            settings: Mutex::new(Default::default()),
+            profiles: Arc::new(Default::default()),
+            privacy: Mutex::new(Arc::new(challa_core::WindowsPrivacyGuard::new())),
+            quick: Mutex::new(None),
+            shortcut_error: Mutex::new(None),
+            matcher,
+            bitwarden: Arc::new(BitwardenClient::with_profile(
+                std::env::temp_dir().join("challa-recovery-test"),
+            )),
+            changes: Arc::new(Mutex::new(())),
+            storage_path: std::env::temp_dir().join("challa-recovery-test.dpapi"),
+            startup_error: None,
+        };
+        let old_privacy = state.privacy.lock().unwrap().clone();
+        recover_input_engine(&state, false).unwrap();
+        assert!(!Arc::ptr_eq(&old_privacy, &state.privacy.lock().unwrap()));
+        let old_buffer = {
+            let slot = state.hook.lock().unwrap();
+            let hook = slot.as_ref().unwrap();
+            assert!(hook.is_active());
+            hook.set_paused(true);
+            hook.buffer()
+        };
+        recover_input_engine(&state, true).unwrap();
+        {
+            let slot = state.hook.lock().unwrap();
+            let hook = slot.as_ref().unwrap();
+            assert!(hook.is_active());
+            assert!(hook.is_paused());
+            assert!(!Arc::ptr_eq(&old_buffer, &hook.buffer()));
+        }
+        recover_input_engine(&state, false).unwrap();
+        let slot = state.hook.lock().unwrap();
+        assert!(slot.as_ref().unwrap().is_active());
+        assert!(!slot.as_ref().unwrap().is_paused());
+        assert!(state.engine_error.lock().unwrap().is_none());
+        assert_eq!(state.matcher.lock().unwrap().list_snippets().len(), 1);
+        assert_eq!(
+            state.bitwarden.status(),
+            challa_bitwarden::VaultStatus::Locked
+        );
+    }
     #[test]
     fn duplicate_and_ime_composition_keywords_are_rejected_before_saving() {
         let snippet = Snippet::plain_text("1", "소개", ":challa", "한글");

@@ -373,8 +373,8 @@ try:
         password = gui.CreateWindowEx(0, "EDIT", "", con.WS_CHILD | con.WS_VISIBLE | con.ES_PASSWORD, 10, 320, 700, 30, window, 2, 0, None)
         gui.SetFocus(password); pump(0.2)
         send(events(":challa")); pump(0.2)
-        assert value(password) == ":challa", "Password field unexpectedly expanded a keyword"
-        results.append({"scenario": "password_field_blocks_capture_and_expansion", "passed": True})
+        assert value(password) == intro, "Confirmed password field did not expand the registered keyword"
+        results.append({"scenario": "confirmed_password_field_expands_registered_keyword", "passed": True})
 finally:
     # A failed held-modifier assertion must never leave the user's keyboard held.
     send([key(con.VK_LSHIFT, True), key(con.VK_LCONTROL, True), key(con.VK_LMENU, True)])

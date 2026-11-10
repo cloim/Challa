@@ -21,7 +21,7 @@ use windows::{
 use zeroize::{Zeroize, Zeroizing};
 
 const LIMIT: u64 = 64 * 1024 * 1024;
-fn crypt(input: &[u8], encrypt: bool) -> Result<Zeroizing<Vec<u8>>, Error> {
+pub(crate) fn crypt(input: &[u8], encrypt: bool) -> Result<Zeroizing<Vec<u8>>, Error> {
     if input.len() as u64 > LIMIT {
         return Err(Error::InvalidResponse);
     }

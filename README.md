@@ -55,6 +55,15 @@ Challa의 세션 키와 선택한 필드 값은 Rust 메모리에만 보관합�
 
 공식 Password Manager SDK가 외부 사용을 지원하지 않아 공식 CLI를 사용합니다. 근거: [Bitwarden SDK](https://github.com/bitwarden/sdk-internal), [CLI 인증과 세션](https://bitwarden.com/help/cli/).
 
+## 시스템 잠금과 엔진 복구
+
+- Windows를 잠그면 Challa 보관함도 잠깁니다. 열려 있던 세션의 키만 Windows DPAPI로 암호화하여 메모리에 보관하고, 평문 필드 캐시를 지웁니다.
+- 같은 앱 실행 중 Windows 잠금을 해제하면 이전 보관함 세션을 복원하고, 등록된 단축어의 필드를 다시 준비합니다. 직접 잠근 보관함은 잠금 상태를 유지합니다. 앱 재시작 후에는 마스터 비밀번호로 잠금을 해제합니다.
+- Windows 잠금 해제 후 입력 훅을 다시 설치합니다. 사용자가 선택한 일시 정지 상태는 유지합니다.
+- 엔진 실행 중 단축어가 멈추면 앱 하단 또는 트레이 메뉴의 **엔진 복구**를 누릅니다. 입력 훅, 치환 작업 스레드와 입력 상태를 새로 만들고 단축어를 재개합니다.
+
+이 동작이나 관련 화면을 변경한 뒤에는 프로젝트 루트에서 `cargo test --workspace`, `pnpm build`를 실행합니다. 격리된 로컬 미리보기(`pnpm preview --host 127.0.0.1 --port 4188`)에서 `node scripts/test_engine_recovery.mjs http://127.0.0.1:4188`를 실행합니다. Node.js, Playwright와 설치된 브라우저가 필요합니다. 이 검사는 모의 IPC만 사용하며 실제 금고와 Windows 설정을 변경하지 않습니다. 종료 코드 0과 `docs/engine-recovery-ui/results.json`의 `passed: true`를 확인합니다. 실패 원인을 수정하고 재검사한 후 설치 파일을 만듭니다. 실제 PC 잠금과 로그인 연동은 별도로 확인합니다.
+
 ## 실행과 빌드
 
 Windows 배포용 앱은 처음 실행할 때 자동 실행을 등록합니다. Windows 로그인으로 시작하면 관리 창을 띄우지 않고 트레이에서 실행합니다. `설정`에서 자동 실행과 닫기 버튼의 트레이 동작을 변경할 수 있습니다. 개발 빌드와 격리된 테스트는 Windows 자동 실행 등록을 변경하지 않습니다.

@@ -248,6 +248,8 @@ struct Session {
 struct State {
     status: VaultStatus,
     session: Option<Session>,
+    system_locked: bool,
+    suspended_key: Option<Zeroizing<Vec<u8>>>,
 }
 pub struct BitwardenClient {
     cli: Option<Arc<dyn CliRunner>>,
@@ -255,6 +257,87 @@ pub struct BitwardenClient {
     operation: Mutex<()>,
     state: RwLock<State>,
     generation: AtomicU64,
+}
+
+#[cfg(all(test, windows))]
+mod session_lock_tests {
+    use super::*;
+
+    fn unlocked_client() -> BitwardenClient {
+        let client =
+            BitwardenClient::with_profile(std::env::temp_dir().join("challa-session-test"));
+        {
+            let mut state = client.state.write().unwrap();
+            state.status = VaultStatus::Unlocked;
+            state.session = Some(Session {
+                key: Zeroizing::new("fixture-resume-key".into()),
+                fields: HashMap::new(),
+                summaries: Some(Vec::new()),
+            });
+        }
+        client
+    }
+
+    #[test]
+    fn system_lock_seals_key_and_resume_invalidates_old_leases() {
+        let client = unlocked_client();
+        let before = client.generation();
+        client.suspend_for_system_lock().unwrap();
+        assert_eq!(client.status(), VaultStatus::Locked);
+        assert!(!client.is_current(before));
+        assert!(client.lease().is_err());
+        {
+            let state = client.state.read().unwrap();
+            assert!(state.session.is_none());
+            let sealed = state.suspended_key.as_ref().unwrap();
+            assert!(!sealed
+                .windows(b"fixture-resume-key".len())
+                .any(|w| w == b"fixture-resume-key"));
+        }
+        let suspended = client.generation();
+        client.suspend_for_system_lock().unwrap();
+        assert_eq!(client.generation(), suspended);
+        assert!(client.resume_after_system_unlock().unwrap());
+        assert_eq!(client.status(), VaultStatus::Unlocked);
+        assert!(!client.is_current(before));
+        assert!(!client.is_current(suspended));
+        let state = client.state.read().unwrap();
+        let session = state.session.as_ref().unwrap();
+        assert_eq!(&*session.key, "fixture-resume-key");
+        assert!(session.fields.is_empty());
+        assert!(session.summaries.is_none());
+        assert!(state.suspended_key.is_none());
+        drop(state);
+        assert!(!client.resume_after_system_unlock().unwrap());
+    }
+
+    #[test]
+    fn manual_lock_before_or_during_system_lock_stays_locked() {
+        for lock_before in [true, false] {
+            let client = unlocked_client();
+            if lock_before {
+                client.lock();
+            }
+            client.suspend_for_system_lock().unwrap();
+            if !lock_before {
+                client.lock();
+            }
+            assert!(!client.resume_after_system_unlock().unwrap());
+            assert_eq!(client.status(), VaultStatus::Locked);
+            assert!(client.lease().is_err());
+        }
+    }
+
+    #[test]
+    fn damaged_resume_key_leaves_vault_locked() {
+        let client = unlocked_client();
+        client.suspend_for_system_lock().unwrap();
+        client.state.write().unwrap().suspended_key = Some(Zeroizing::new(vec![0; 16]));
+        assert!(client.resume_after_system_unlock().is_err());
+        assert_eq!(client.status(), VaultStatus::Locked);
+        assert!(client.lease().is_err());
+        assert!(!client.resume_after_system_unlock().unwrap());
+    }
 }
 
 impl BitwardenClient {
@@ -272,6 +355,8 @@ impl BitwardenClient {
             state: RwLock::new(State {
                 status,
                 session: None,
+                system_locked: false,
+                suspended_key: None,
             }),
             generation: AtomicU64::new(0),
         }
@@ -300,10 +385,56 @@ impl BitwardenClient {
         self.generation.fetch_add(1, Ordering::AcqRel);
         if let Ok(mut state) = self.state.write() {
             state.session = None;
+            state.suspended_key = None;
             if state.status == VaultStatus::Unlocked {
                 state.status = VaultStatus::Locked;
             }
         }
+    }
+    /// Drop plaintext caches and keep only a user-DPAPI-protected resume key in memory.
+    #[cfg(windows)]
+    pub fn suspend_for_system_lock(&self) -> Result<(), Error> {
+        let mut state = self.state.write().map_err(|_| Error::VaultLocked)?;
+        if state.system_locked {
+            return Ok(());
+        }
+        state.system_locked = true;
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        let session = state.session.take();
+        state.suspended_key = None;
+        if state.status == VaultStatus::Unlocked {
+            state.status = VaultStatus::Locked;
+        }
+        if let Some(session) = session {
+            state.suspended_key = Some(crate::profile::crypt(session.key.as_bytes(), true)?);
+        }
+        Ok(())
+    }
+    /// Resume only a session suspended by Windows locking. Manual lock clears its key.
+    #[cfg(windows)]
+    pub fn resume_after_system_unlock(&self) -> Result<bool, Error> {
+        let mut state = self.state.write().map_err(|_| Error::VaultLocked)?;
+        if !state.system_locked {
+            return Ok(false);
+        }
+        state.system_locked = false;
+        let Some(protected) = state.suspended_key.take() else {
+            return Ok(false);
+        };
+        let bytes = crate::profile::crypt(&protected, false)?;
+        let key = Zeroizing::new(
+            std::str::from_utf8(&bytes)
+                .map_err(|_| Error::InvalidResponse)?
+                .to_owned(),
+        );
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        state.session = Some(Session {
+            key,
+            fields: HashMap::new(),
+            summaries: None,
+        });
+        state.status = VaultStatus::Unlocked;
+        Ok(true)
     }
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
@@ -442,7 +573,7 @@ impl BitwardenClient {
             return Err(Error::InvalidResponse);
         }
         let mut state = self.state.write().map_err(|_| Error::VaultLocked)?;
-        if epoch != self.generation() {
+        if epoch != self.generation() || state.system_locked {
             return Err(Error::VaultLocked);
         }
         state.session = Some(Session {
@@ -877,6 +1008,8 @@ mod tests {
             state: RwLock::new(State {
                 status: VaultStatus::Locked,
                 session: None,
+                system_locked: false,
+                suspended_key: None,
             }),
             generation: AtomicU64::new(0),
         });

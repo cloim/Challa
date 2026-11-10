@@ -292,7 +292,15 @@ fn open(
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
     let pid = interactive::process_id(target);
-    if pid == 0 || pid == std::process::id() || target.1 == 0 || state.privacy.is_input_blocked() {
+    if pid == 0
+        || pid == std::process::id()
+        || target.1 == 0
+        || state
+            .privacy
+            .lock()
+            .map_err(|e| e.to_string())?
+            .is_input_blocked()
+    {
         return Err("입력할 앱의 일반 입력창에서 실행해 주세요".into());
     }
     if !get_engine_status_from(&state).0 || get_engine_status_from(&state).1 {
@@ -373,7 +381,7 @@ pub async fn submit_quick(
         request.clone()
     };
     let vault = state.bitwarden.clone();
-    let privacy = state.privacy.clone();
+    let privacy = state.privacy.lock().map_err(|e| e.to_string())?.clone();
     let paused = get_engine_status_from(&state).1;
     if paused {
         return Err("입력 엔진을 재개해 주세요".into());
@@ -641,9 +649,13 @@ fn setup_tray(app: &tauri::AppHandle) -> anyhow::Result<()> {
     )?;
     let profile = Submenu::with_items(app, "프로필", true, &[&work, &personal])?;
     let pause = MenuItem::with_id(app, "pause", "일시 정지 / 재개", true, None::<&str>)?;
+    let recover = MenuItem::with_id(app, "recover", "엔진 복구", true, None::<&str>)?;
     let lock = MenuItem::with_id(app, "lock", "보관함 잠금", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "종료", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&update, &show, &profile, &pause, &lock, &quit])?;
+    let menu = Menu::with_items(
+        app,
+        &[&update, &show, &profile, &pause, &recover, &lock, &quit],
+    )?;
 
     app.manage(TrayProfileMenu {
         work: work.clone(),
@@ -709,6 +721,19 @@ fn setup_tray(app: &tauri::AppHandle) -> anyhow::Result<()> {
                             }
                         }
                     }
+                }
+                "recover" => {
+                    let app = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        match crate::recover_engine(app.clone()).await {
+                            Ok(status) => {
+                                let _ = app.emit("engine-state", status);
+                            }
+                            Err(error) => {
+                                let _ = app.emit("operation-error", error);
+                            }
+                        }
+                    });
                 }
                 "lock" => state.bitwarden.lock(),
                 "quit" => {

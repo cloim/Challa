@@ -28,6 +28,7 @@ export async function deleteSnippet(id: string): Promise<void> {
   localStorage.setItem("challa-preview-snippets", JSON.stringify(previewSnippets().filter(s => s.id !== id)));
 }
 export async function pauseEngine(paused: boolean): Promise<void> { if (desktop) await invoke("set_engine_paused", { paused }); }
+export async function recoverEngine(): Promise<EngineStatus> { return invoke("recover_engine"); }
 export async function clearBuffer(): Promise<void> { if (desktop) await invoke("clear_buffer"); }
 const previewVault: VaultInfo = { status: "Unauthenticated", cli_available: false, cached_fields: 0 };
 export async function vaultInfo(inspect = false): Promise<VaultInfo> { return desktop ? invoke(inspect ? "inspect_vault" : "get_vault_status") : previewVault; }

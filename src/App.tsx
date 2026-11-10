@@ -11,7 +11,7 @@ import { SelectControl } from "./components/SelectControl";
 import { DesktopSettings } from "./components/DesktopSettings";
 import { VaultPanel, VaultReferenceEditor } from "./components/VaultPanel";
 import challaMark from "./assets/challa-mark.svg";
-import { clearBuffer, deleteSnippet, desktop, engineStatus, fieldLabel, listSnippets, pauseEngine, saveSnippet, syncVault, triggerLabels, type EngineStatus, type Snippet, type Trigger, type VaultField, type VaultItem } from "./api";
+import { clearBuffer, deleteSnippet, desktop, engineStatus, fieldLabel, listSnippets, pauseEngine, recoverEngine, saveSnippet, syncVault, triggerLabels, type EngineStatus, type Snippet, type Trigger, type VaultField, type VaultItem } from "./api";
 
 const initialStatus: EngineStatus = { active: false, paused: false, vault: "Locked", error: null };
 function IconButton({ label, children, onClick, disabled = false }: { label: string; children: ReactNode; onClick: () => void; disabled?: boolean }) {
@@ -29,6 +29,7 @@ export function App() {
   const navigate = (next: "library" | "vault" | "settings") => { location.hash = next === "vault" ? "/vault" : next === "settings" ? "/settings" : "/snippets"; setPage(next); };
   const [snippets, setSnippets] = useState<Snippet[]>([]);
   const [status, setStatus] = useState(initialStatus);
+  const [recovering, setRecovering] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
@@ -146,6 +147,13 @@ export function App() {
     try { await pauseEngine(!status.paused); setStatus(await engineStatus()); }
     catch (error) { setToast(String(error)); }
   };
+  const recover = async () => {
+    if (recovering) return;
+    setRecovering(true);
+    try { setStatus(await recoverEngine()); setToast("입력 엔진을 복구했어요. 단축어를 다시 입력해 주세요"); }
+    catch (error) { setToast(String(error)); void engineStatus().then(setStatus).catch(() => {}); }
+    finally { setRecovering(false); }
+  };
 
   return <div className="flex h-dvh min-h-0 flex-col bg-canvas text-ink">
     <div className="flex min-h-0 flex-1">
@@ -208,7 +216,8 @@ export function App() {
     </div>
     <footer className="flex h-9 shrink-0 items-center gap-4 border-t border-line bg-sidebar px-5 text-[12px] text-muted max-[600px]:gap-2 max-[600px]:px-3">
       <span className="flex min-w-0 items-center gap-2" aria-label={status.error ?? undefined}><span className={`size-1.5 shrink-0 rounded-full ${status.active && !status.paused && !status.error ? "bg-mint" : "bg-[#d8bb79]"}`} /><span className="truncate">{!desktop ? "미리보기 모드" : status.error ? status.error : status.active ? status.paused ? "엔진 일시 정지" : "입력 엔진 실행 중" : "엔진 연결 확인"}</span></span>
-      {desktop && <button className="flex items-center gap-1.5 hover:text-ink disabled:opacity-40" disabled={!status.active} onClick={() => void toggleEngine()} aria-label={status.paused ? "엔진 재개" : "엔진 일시 정지"}>{status.paused ? <Play size={10} /> : <Pause size={10} />}<span className="max-[500px]:hidden">{status.paused ? "재개" : "일시 정지"}</span></button>}
+      {desktop && <button className="flex shrink-0 items-center gap-1.5 hover:text-ink disabled:opacity-40" disabled={!status.active || recovering} onClick={() => void toggleEngine()} aria-label={status.paused ? "엔진 재개" : "엔진 일시 정지"}>{status.paused ? <Play size={10} /> : <Pause size={10} />}<span className="max-[500px]:hidden">{status.paused ? "재개" : "일시 정지"}</span></button>}
+      {desktop && <button className="flex shrink-0 items-center gap-1.5 hover:text-ink disabled:opacity-40" disabled={recovering} aria-busy={recovering} aria-label="엔진 복구" data-tip="단축어가 멈추면 입력 엔진을 다시 시작해요" onClick={() => void recover()}><RefreshCw size={12} className={recovering ? "animate-spin" : ""} /><span className="whitespace-nowrap max-[700px]:hidden">{recovering ? "복구 중" : "엔진 복구"}</span></button>}
       <button className="ml-auto flex shrink-0 items-center gap-1.5 hover:text-mint" onClick={() => navigate(page === "vault" ? "library" : "vault")} aria-label={page === "vault" ? "스니펫으로 돌아가기" : "보관함 열기"}><LockKeyhole size={12} />{page === "vault" ? "스니펫" : "보관함"}</button>
       <button className="flex shrink-0 items-center gap-1.5 hover:text-ink" aria-label="버퍼 비우기" onClick={() => void clearBuffer().then(() => setToast(desktop ? "입력 버퍼를 지웠어요" : "데스크톱 앱에서 입력 버퍼를 관리해요")).catch(e => setToast(String(e)))}><ShieldCheck size={12} /><span className="max-[600px]:hidden">버퍼 비우기</span></button>
       <button className="flex shrink-0 items-center gap-1.5 hover:text-mint min-[601px]:hidden" onClick={() => navigate("settings")} aria-label="앱 설정"><Settings size={12} />설정</button>
