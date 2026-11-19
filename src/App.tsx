@@ -11,7 +11,7 @@ import { SelectControl } from "./components/SelectControl";
 import { DesktopSettings } from "./components/DesktopSettings";
 import { VaultPanel, VaultReferenceEditor } from "./components/VaultPanel";
 import challaMark from "./assets/challa-mark.svg";
-import { clearBuffer, deleteSnippet, desktop, engineStatus, fieldLabel, listSnippets, pauseEngine, recoverEngine, saveSnippet, syncVault, triggerLabels, type EngineStatus, type Snippet, type Trigger, type VaultField, type VaultItem } from "./api";
+import { clearBuffer, deleteSnippet, desktop, engineStatus, fieldLabel, listSnippets, pauseEngine, recoverEngine, saveSnippet, syncVault, triggerLabels, type EngineStatus, type Snippet, type Trigger } from "./api";
 
 const initialStatus: EngineStatus = { active: false, paused: false, vault: "Locked", error: null };
 function IconButton({ label, children, onClick, disabled = false }: { label: string; children: ReactNode; onClick: () => void; disabled?: boolean }) {
@@ -101,11 +101,6 @@ export function App() {
     setOriginal(""); setFormError(""); setConfirmDelete(false);
     requestAnimationFrame(() => nameRef.current?.focus());
   };
-  const useVaultItem = (item: VaultItem, field: VaultField) => {
-    if (dirty) { setToast("작성 중인 내용을 먼저 저장하거나 취소해 주세요"); return; }
-    setDraft({ id: crypto.randomUUID(), name: item.name, keyword: "", content: { BitwardenRef: { item_id: item.id, field } }, trigger_mode: "Space", enabled: true, profile: "common" });
-    setOriginal(""); setFormError(""); setConfirmDelete(false); navigate("library");
-  };
   const visible = useMemo(() => snippets.filter(s => (filter === "all" || s.enabled === (filter === "active")) && `${s.name} ${s.keyword} ${bodyOf(s)}`.toLocaleLowerCase().includes(query.toLocaleLowerCase())), [snippets, filter, query]);
   const readyOf = useCallback((s: Snippet) => product.readiness[s.id] ?? (!s.enabled ? "disabled" : (s.profile ?? "common") !== "common" && s.profile !== product.effective_profile ? "profile" : "BitwardenRef" in s.content ? "vault_locked" : s.template && s.content.PlainText.includes("{{") ? "template" : "ready"), [product]);
   const resolveReadiness = (reason: string) => {
@@ -172,7 +167,7 @@ export function App() {
         </div>
       </aside>
 
-      {page === "settings" ? <DesktopSettings /> : page === "vault" ? <VaultPanel onUse={useVaultItem} onStatusChange={() => { void engineStatus().then(setStatus).catch(e => setToast(String(e))); }} /> : <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+      {page === "settings" ? <DesktopSettings /> : page === "vault" ? <VaultPanel snippets={snippets} onSaved={count => { void refresh(); setToast(`Bitwarden 스니펫 ${count}개를 암호화해 저장했어요`); }} onStatusChange={() => { void engineStatus().then(setStatus).catch(e => setToast(String(e))); }} /> : <main className="flex min-h-0 min-w-0 flex-1 flex-col">
         <header className="flex h-[76px] shrink-0 items-center justify-between gap-3 border-b border-line px-8 max-[600px]:h-[76px] max-[600px]:px-4">
           <div className="min-w-0"><h1 className="text-xl font-semibold tracking-[-.04em]" data-ui-audit-context-title>{filter === "active" ? "사용 중" : filter === "disabled" ? "사용 중지" : "모든 스니펫"}<span className="ml-3 align-middle text-xs font-normal tracking-normal text-muted">{snippets.length}</span></h1></div>
           <div className="flex shrink-0 items-center gap-2">

@@ -4,14 +4,14 @@ import type { ColDef, ICellRendererParams } from "ag-grid-community";
 import { DataGrid } from "./DataGrid";
 import { SelectControl } from "./SelectControl";
 import { VaultItemPicker } from "./VaultItemPicker";
+import { VaultSnippetDialog } from "./VaultSnippetDialog";
 import { searchVaultItems, vaultItemLabel } from "../vaultSearch";
-import { desktop, fieldLabel, lockVault, loginVault, logoutVault, syncVault, unlockVault, vaultInfo, vaultItems, vaultLabels, type VaultField, type VaultInfo, type VaultItem, type VaultReference } from "../api";
+import { desktop, fieldLabel, lockVault, loginVault, logoutVault, syncVault, unlockVault, vaultInfo, vaultItems, vaultLabels, type Snippet, type VaultField, type VaultInfo, type VaultItem, type VaultReference } from "../api";
 
-export function VaultPanel({ onUse, onStatusChange }: { onUse: (item: VaultItem, field: VaultField) => void; onStatusChange: () => void }) {
+export function VaultPanel({ snippets, onSaved, onStatusChange }: { snippets: Snippet[]; onSaved: (count: number) => void; onStatusChange: () => void }) {
   const [info, setInfo] = useState<VaultInfo | null>(null);
   const [items, setItems] = useState<VaultItem[]>([]);
   const [selected, setSelected] = useState<VaultItem | null>(null);
-  const [field, setField] = useState<VaultField>("Password");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -46,11 +46,17 @@ export function VaultPanel({ onUse, onStatusChange }: { onUse: (item: VaultItem,
     } else { const master = password; setPassword(""); void act(() => unlockVault(master)); }
   };
   const rows = useMemo(() => searchVaultItems(items, query), [items, query]);
+  const linkedBy = useMemo(() => {
+    const map = new Map<string, Snippet[]>();
+    for (const s of snippets) if ("BitwardenRef" in s.content) map.set(s.content.BitwardenRef.item_id, [...(map.get(s.content.BitwardenRef.item_id) ?? []), s]);
+    return map;
+  }, [snippets]);
   const columns = useMemo<ColDef<VaultItem>[]>(() => [
     { field: "name", headerName: "항목", minWidth: 180, flex: 1.3, cellRenderer: ({ data }: ICellRendererParams<VaultItem>) => data && <div className="flex h-full items-center gap-3"><span className="snippet-icon"><KeyRound size={16} /></span><span className="truncate">{vaultItemLabel(data)}</span></div> },
     { field: "username", headerName: "사용자 이름", minWidth: 160, flex: 1, valueFormatter: ({ value }) => value || "사용자 이름 없음" },
     { headerName: "연결 가능 필드", minWidth: 170, flex: 1.1, valueGetter: ({ data }) => data?.fields.map(fieldLabel).join(", ") },
-  ], []);
+    { colId: "linked", headerName: "연결된 단축어", minWidth: 150, flex: 1, valueGetter: ({ data }) => data ? linkedBy.get(data.id)?.length ?? 0 : 0, cellRenderer: ({ data }: ICellRendererParams<VaultItem>) => { const list = data ? linkedBy.get(data.id) ?? [] : []; return list.length ? <div className="flex min-w-0 items-center gap-1.5">{list.slice(0, 2).map(s => <code key={s.id} className="keyword-chip">{s.keyword}</code>)}{list.length > 2 && <span className="shrink-0 text-xs text-muted">+{list.length - 2}</span>}</div> : <span className="text-xs text-muted">없음</span>; } },
+  ], [linkedBy]);
   return <main className="flex min-h-0 min-w-0 flex-1 flex-col" aria-label="Bitwarden 보관함">
     <header className="flex h-[76px] shrink-0 items-center justify-between gap-2 border-b border-line px-8 max-[600px]:h-[76px] max-[600px]:px-4">
       <div><h1 className="text-xl font-semibold tracking-tight" data-ui-audit-context-title>Bitwarden</h1></div>
@@ -63,9 +69,9 @@ export function VaultPanel({ onUse, onStatusChange }: { onUse: (item: VaultItem,
     {error && <div role="alert" className="flex shrink-0 items-start gap-3 border-b border-rose-400/30 bg-rose-400/5 px-6 py-3 text-xs leading-5 text-rose-200"><span className="flex-1">{error}</span><button aria-label="보관함 오류 닫기" onClick={() => setError("")}><X size={14} /></button></div>}
     {loading ? <div className="m-8 h-40 animate-pulse rounded-2xl border border-line bg-panel" aria-label="보관함 상태 확인 중" /> : info?.status === "Unlocked" ? <>
       <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 px-7 py-5 max-[600px]:px-4"><label className="flex h-9 min-w-0 max-w-sm flex-1 items-center gap-2 rounded-lg border border-line bg-panel px-3"><Search size={14} className="shrink-0 text-muted" /><input className="min-w-0 flex-1 bg-transparent text-xs outline-none" aria-label="보관함 검색" placeholder="항목 이름, 사용자 이름 검색" value={query} onChange={e => setQuery(e.target.value)} /></label><span className="text-xs text-muted">{rows.length}개 항목</span></div>
-      <DataGrid label="보관함 항목 목록" emptyMessage="검색 조건에 맞는 보관함 항목이 없어요" rows={rows} columns={columns} loading={busy} error="" selectedId={selected?.id} onSelect={item => { setSelected(item); setField(item.fields.includes("Password") ? "Password" : item.fields[0] ?? "Username"); }} />
-      {selected && <div className="flex shrink-0 flex-wrap items-end gap-3 border-t border-line bg-panel px-7 py-4 max-[600px]:px-4"><label className="form-label min-w-0 flex-1"><span className="truncate">{selected.name}</span><SelectControl aria-label="연결할 필드" value={JSON.stringify(field)} onChange={e => setField(JSON.parse(e.target.value) as VaultField)}>{selected.fields.map(f => <option key={JSON.stringify(f)} value={JSON.stringify(f)}>{fieldLabel(f)}</option>)}</SelectControl></label><button className="primary-button" disabled={!selected.fields.length || busy} onClick={() => onUse(selected, field)}>스니펫으로 연결<ArrowRight size={14} /></button></div>}
-      <p className="shrink-0 border-t border-line px-7 py-3 text-[12px] leading-5 text-muted">준비된 필드 {info.cached_fields}개 | PC 잠금과 해제에 맞춰 보관함을 잠그고 복원해요</p>
+      <DataGrid label="보관함 항목 목록" emptyMessage="검색 조건에 맞는 보관함 항목이 없어요" rows={rows} columns={columns} loading={busy} error="" selectedId={selected?.id} onSelect={item => setSelected(item)} />
+      <p className="shrink-0 border-t border-line px-7 py-3 text-[12px] leading-5 text-muted">항목을 누르면 필드별 단축어를 한 번에 등록해요 | 준비된 필드 {info.cached_fields}개 | PC 잠금과 해제에 맞춰 보관함을 잠그고 복원해요</p>
+      {selected && <VaultSnippetDialog key={selected.id} item={selected} snippets={snippets} onClose={() => setSelected(null)} onSaved={onSaved} />}
     </> : <div className="flex min-h-0 flex-1 overflow-y-auto p-8 max-[600px]:p-4">
       <div className="m-auto w-full max-w-[440px] rounded-2xl border border-line bg-panel p-7 max-[400px]:p-5">
         <div className="mb-5 flex items-center gap-3"><span className="snippet-icon text-mint"><LockKeyhole size={20} /></span><div><h2 className="text-sm font-medium">{!desktop ? "데스크톱에서 보관함을 연결하세요" : info ? vaultLabels[info.status] : "연결 상태를 확인해 주세요"}</h2></div></div>
