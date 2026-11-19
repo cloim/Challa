@@ -9,6 +9,7 @@ use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::Receiver,
+        Arc,
     },
     time::{Duration, Instant},
 };
@@ -17,14 +18,6 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_updater::UpdaterExt;
 
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
-static UPDATING: AtomicBool = AtomicBool::new(false);
-
-struct UpdateGuard;
-impl Drop for UpdateGuard {
-    fn drop(&mut self) {
-        UPDATING.store(false, Ordering::SeqCst);
-    }
-}
 
 pub struct TrayProfileMenu {
     pub work: tauri::menu::CheckMenuItem<Wry>,
@@ -38,74 +31,178 @@ pub fn update_tray_profile_checked(app: &tauri::AppHandle, active_profile: &str)
     }
 }
 
-fn trigger_update_check(app: tauri::AppHandle) {
-    if UPDATING
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UpdateStatus {
+    Idle,
+    Checking,
+    UpToDate,
+    Failed,
+    Available { version: String },
+    Downloading { version: String },
+    Installing { version: String },
+}
+
+impl UpdateStatus {
+    pub fn menu_text_and_enabled(&self, current_version: &str) -> (String, bool) {
+        match self {
+            UpdateStatus::Idle => ("업데이트 확인".to_string(), true),
+            UpdateStatus::Checking => ("업데이트 확인 중...".to_string(), false),
+            UpdateStatus::UpToDate => (format!("최신 버전 (v{current_version})"), false),
+            UpdateStatus::Failed => (format!("업데이트 확인 실패 (v{current_version})"), true),
+            UpdateStatus::Available { version } => (format!("업데이트 하기 (v{version})"), true),
+            UpdateStatus::Downloading { version } => {
+                (format!("업데이트 다운로드 중 (v{version})"), false)
+            }
+            UpdateStatus::Installing { version } => {
+                (format!("업데이트 설치 중 (v{version})"), false)
+            }
+        }
+    }
+}
+
+pub fn apply_update_status(
+    item: &tauri::menu::MenuItem<Wry>,
+    status: &UpdateStatus,
+    current_version: &str,
+) {
+    let (text, enabled) = status.menu_text_and_enabled(current_version);
+    let _ = item.set_text(text);
+    let _ = item.set_enabled(enabled);
+}
+
+async fn perform_update_check(
+    app: &tauri::AppHandle,
+    item: &tauri::menu::MenuItem<Wry>,
+    status_lock: &tokio::sync::Mutex<UpdateStatus>,
+    pending_update: &tokio::sync::Mutex<Option<tauri_plugin_updater::Update>>,
+) {
+    let current_version = app.package_info().version.to_string();
     {
-        return;
+        let mut st = status_lock.lock().await;
+        *st = UpdateStatus::Checking;
+        apply_update_status(item, &st, &current_version);
     }
 
-    tauri::async_runtime::spawn(async move {
-        let _guard = UpdateGuard;
-        let updater = match app.updater() {
-            Ok(u) => u,
-            Err(e) => {
-                app.dialog()
-                    .message(format!("업데이트 확인에 실패했어요: {e}"))
-                    .title("Challa 업데이트")
-                    .kind(MessageDialogKind::Error)
-                    .blocking_show();
-                return;
+    let updater = match app.updater() {
+        Ok(u) => u,
+        Err(e) => {
+            let mut st = status_lock.lock().await;
+            *st = UpdateStatus::Failed;
+            apply_update_status(item, &st, &current_version);
+            app.dialog()
+                .message(format!("업데이트 확인에 실패했어요: {e}"))
+                .title("Challa 업데이트")
+                .kind(MessageDialogKind::Error)
+                .blocking_show();
+            return;
+        }
+    };
+
+    match updater.check().await {
+        Ok(Some(update)) => {
+            let version = update.version.clone();
+            *pending_update.lock().await = Some(update);
+            let mut st = status_lock.lock().await;
+            *st = UpdateStatus::Available { version };
+        }
+        Ok(None) => {
+            *pending_update.lock().await = None;
+            let mut st = status_lock.lock().await;
+            *st = UpdateStatus::UpToDate;
+        }
+        Err(e) => {
+            let mut st = status_lock.lock().await;
+            *st = UpdateStatus::Failed;
+            app.dialog()
+                .message(format!("업데이트 확인에 실패했어요: {e}"))
+                .title("Challa 업데이트")
+                .kind(MessageDialogKind::Error)
+                .blocking_show();
+        }
+    }
+
+    let st = status_lock.lock().await;
+    apply_update_status(item, &st, &current_version);
+}
+
+async fn handle_update_action(
+    app: &tauri::AppHandle,
+    item: &tauri::menu::MenuItem<Wry>,
+    status_lock: Arc<tokio::sync::Mutex<UpdateStatus>>,
+    pending_update: Arc<tokio::sync::Mutex<Option<tauri_plugin_updater::Update>>>,
+) {
+    let current_version = app.package_info().version.to_string();
+    let current = {
+        let st = status_lock.lock().await;
+        st.clone()
+    };
+
+    match current {
+        UpdateStatus::Idle | UpdateStatus::Failed => {
+            perform_update_check(app, item, &status_lock, &pending_update).await;
+        }
+        UpdateStatus::Available { version } => {
+            let update_opt = pending_update.lock().await.take();
+            let update = match update_opt {
+                Some(u) => u,
+                None => match app.updater() {
+                    Ok(u) => match u.check().await {
+                        Ok(Some(new_u)) => new_u,
+                        _ => return,
+                    },
+                    _ => return,
+                },
+            };
+
+            {
+                let mut st = status_lock.lock().await;
+                *st = UpdateStatus::Downloading {
+                    version: version.clone(),
+                };
+                apply_update_status(item, &st, &current_version);
             }
-        };
 
-        match updater.check().await {
-            Ok(Some(update)) => {
-                let msg = format!(
-                    "새 버전(v{})이 있어요.\n지금 설치하고 앱을 다시 시작할까요?",
-                    update.version
-                );
-                let confirmed = app
-                    .dialog()
-                    .message(msg)
-                    .title("Challa 업데이트")
-                    .kind(MessageDialogKind::Info)
-                    .buttons(MessageDialogButtons::YesNo)
-                    .blocking_show();
-
-                if confirmed {
-                    app.state::<AppState>().bitwarden.lock();
-                    match update.download_and_install(|_, _| {}, || {}).await {
-                        Ok(()) => {
-                            app.request_restart();
-                        }
-                        Err(e) => {
-                            app.dialog()
-                                .message(format!("업데이트 다운로드 및 설치에 실패했어요: {e}"))
-                                .title("Challa 업데이트")
-                                .kind(MessageDialogKind::Error)
-                                .blocking_show();
-                        }
+            app.state::<AppState>().bitwarden.lock();
+            match update.download_and_install(|_, _| {}, || {}).await {
+                Ok(()) => {
+                    {
+                        let mut st = status_lock.lock().await;
+                        *st = UpdateStatus::Installing {
+                            version: version.clone(),
+                        };
+                        apply_update_status(item, &st, &current_version);
+                    }
+                    app.request_restart();
+                }
+                Err(e) => {
+                    {
+                        let mut st = status_lock.lock().await;
+                        *st = UpdateStatus::Available {
+                            version: version.clone(),
+                        };
+                        apply_update_status(item, &st, &current_version);
+                    }
+                    let fail_msg = format!(
+                        "업데이트 다운로드 및 설치에 실패했습니다.\n\n{e}\n\nGitHub 릴리스 페이지를 브라우저로 여시겠습니까?"
+                    );
+                    let confirmed = app
+                        .dialog()
+                        .message(fail_msg)
+                        .title("Challa 업데이트")
+                        .kind(MessageDialogKind::Error)
+                        .buttons(MessageDialogButtons::YesNo)
+                        .blocking_show();
+                    if confirmed {
+                        let url = format!("https://github.com/cloim/Challa/releases/tag/v{version}");
+                        let _ = std::process::Command::new("cmd")
+                            .args(["/c", "start", "", &url])
+                            .spawn();
                     }
                 }
             }
-            Ok(None) => {
-                app.dialog()
-                    .message("최신 버전입니다.")
-                    .title("Challa 업데이트")
-                    .kind(MessageDialogKind::Info)
-                    .blocking_show();
-            }
-            Err(e) => {
-                app.dialog()
-                    .message(format!("업데이트 확인에 실패했어요: {e}"))
-                    .title("Challa 업데이트")
-                    .kind(MessageDialogKind::Error)
-                    .blocking_show();
-            }
         }
-    });
+        _ => {}
+    }
 }
 #[derive(Clone)]
 pub struct QuickRequest {
@@ -619,7 +716,7 @@ pub fn setup(app: tauri::AppHandle, receiver: Receiver<EngineEvent>) -> anyhow::
 }
 fn setup_tray(app: &tauri::AppHandle) -> anyhow::Result<()> {
     use tauri::{
-        menu::{CheckMenuItem, Menu, MenuItem, Submenu},
+        menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
         tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     };
     let initial_profile = app
@@ -629,8 +726,11 @@ fn setup_tray(app: &tauri::AppHandle) -> anyhow::Result<()> {
         .map(|s| s.active_profile.clone())
         .unwrap_or_else(|_| "work".into());
 
-    let update = MenuItem::with_id(app, "update", "업데이트", true, None::<&str>)?;
+    let current_version = app.package_info().version.to_string();
+    let update = MenuItem::with_id(app, "update", "업데이트 확인", true, None::<&str>)?;
+    let sep1 = PredefinedMenuItem::separator(app)?;
     let show = MenuItem::with_id(app, "show", "열기", true, None::<&str>)?;
+    let sep2 = PredefinedMenuItem::separator(app)?;
     let work = CheckMenuItem::with_id(
         app,
         "work",
@@ -651,16 +751,50 @@ fn setup_tray(app: &tauri::AppHandle) -> anyhow::Result<()> {
     let pause = MenuItem::with_id(app, "pause", "일시 정지 / 재개", true, None::<&str>)?;
     let recover = MenuItem::with_id(app, "recover", "엔진 복구", true, None::<&str>)?;
     let lock = MenuItem::with_id(app, "lock", "보관함 잠금", true, None::<&str>)?;
+    let sep3 = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "종료", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
-        &[&update, &show, &profile, &pause, &recover, &lock, &quit],
+        &[
+            &update, &sep1, &show, &sep2, &profile, &pause, &recover, &lock, &sep3, &quit,
+        ],
     )?;
+
+    let update_status: Arc<tokio::sync::Mutex<UpdateStatus>> =
+        Arc::new(tokio::sync::Mutex::new(UpdateStatus::Idle));
+    let pending_update: Arc<tokio::sync::Mutex<Option<tauri_plugin_updater::Update>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+
+    let app_auto = app.clone();
+    let update_auto = update.clone();
+    let status_auto = update_status.clone();
+    let pending_auto = pending_update.clone();
+    let version_auto = current_version.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        if let Ok(updater) = app_auto.updater() {
+            if let Ok(check_result) = updater.check().await {
+                let mut st = status_auto.lock().await;
+                if let Some(up) = check_result {
+                    let version = up.version.clone();
+                    *pending_auto.lock().await = Some(up);
+                    *st = UpdateStatus::Available { version };
+                } else {
+                    *st = UpdateStatus::UpToDate;
+                }
+                apply_update_status(&update_auto, &st, &version_auto);
+            }
+        }
+    });
 
     app.manage(TrayProfileMenu {
         work: work.clone(),
         personal: personal.clone(),
     });
+
+    let update_click = update.clone();
+    let status_click = update_status.clone();
+    let pending_click = pending_update.clone();
 
     TrayIconBuilder::with_id("challa-tray")
         .icon(tauri::include_image!("icons/icon.png"))
@@ -674,16 +808,25 @@ fn setup_tray(app: &tauri::AppHandle) -> anyhow::Result<()> {
                     button: MouseButton::Left,
                     button_state: MouseButtonState::Up,
                     ..
+                } | TrayIconEvent::DoubleClick {
+                    button: MouseButton::Left,
+                    ..
                 }
             ) {
                 crate::desktop::show_main(tray.app_handle());
             }
         })
-        .on_menu_event(|app, event| {
+        .on_menu_event(move |app, event| {
             let state = app.state::<AppState>();
             match event.id.as_ref() {
                 "update" => {
-                    trigger_update_check(app.clone());
+                    let app_handle = app.clone();
+                    let item = update_click.clone();
+                    let st = status_click.clone();
+                    let pu = pending_click.clone();
+                    tauri::async_runtime::spawn(async move {
+                        handle_update_action(&app_handle, &item, st, pu).await;
+                    });
                 }
                 "show" => {
                     crate::desktop::show_main(app);
@@ -749,6 +892,49 @@ fn setup_tray(app: &tauri::AppHandle) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_status_labels_follow_balance_guidelines() {
+        let v = "0.2.1";
+        assert_eq!(
+            UpdateStatus::Idle.menu_text_and_enabled(v),
+            ("업데이트 확인".to_string(), true)
+        );
+        assert_eq!(
+            UpdateStatus::Checking.menu_text_and_enabled(v),
+            ("업데이트 확인 중...".to_string(), false)
+        );
+        assert_eq!(
+            UpdateStatus::UpToDate.menu_text_and_enabled(v),
+            ("최신 버전 (v0.2.1)".to_string(), false)
+        );
+        assert_eq!(
+            UpdateStatus::Failed.menu_text_and_enabled(v),
+            ("업데이트 확인 실패 (v0.2.1)".to_string(), true)
+        );
+        assert_eq!(
+            UpdateStatus::Available {
+                version: "0.2.2".into()
+            }
+            .menu_text_and_enabled(v),
+            ("업데이트 하기 (v0.2.2)".to_string(), true)
+        );
+        assert_eq!(
+            UpdateStatus::Downloading {
+                version: "0.2.2".into()
+            }
+            .menu_text_and_enabled(v),
+            ("업데이트 다운로드 중 (v0.2.2)".to_string(), false)
+        );
+        assert_eq!(
+            UpdateStatus::Installing {
+                version: "0.2.2".into()
+            }
+            .menu_text_and_enabled(v),
+            ("업데이트 설치 중 (v0.2.2)".to_string(), false)
+        );
+    }
+
     #[test]
     fn conflicts_include_prefix_suffix_and_overlapping_delimiters() {
         let short = Snippet::plain_text("1", "짧은 서명", ":sig", "a");
