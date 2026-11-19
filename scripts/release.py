@@ -20,6 +20,8 @@ import sys
 def find_credential_manager() -> Path | None:
     home = Path.home()
     candidates = [
+        home / ".gemini" / "antigravity-cli" / "skills" / "balance" / "scripts" / "credential_manager.py",
+        home / ".agents" / "skills" / "balance" / "scripts" / "credential_manager.py",
         home / ".gemini" / "skills" / "using-credentials" / "scripts" / "credential_manager.py",
         home / ".agents" / "skills" / "using-credentials" / "scripts" / "credential_manager.py",
     ]
