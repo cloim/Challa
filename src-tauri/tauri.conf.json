@@ -27,7 +27,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "createUpdaterArtifacts": true,
     "icon": [
       "icons/icon.png",
@@ -39,7 +41,7 @@
       "endpoints": [
         "https://github.com/cloim/Challa/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDkxQTA1NkMzRjM5RUQyQzYKUldURzBwN3p3MWFna2RvYVNXVXJBcVh6S2hDZ0F5K1EwUzYybGo4K042ck5PMUJ0SmpHSGRiZ1MK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUyNEQ1OTU2NDk3RjU1MTQKUldRVVZYOUpWbGxONGo0TnJKbmJTY2hKa095cy96UHlRMFp5YUdGaTNrQTgrYVRYaktZdG5JR0EK",
       "windows": {
         "installMode": "passive"
       }
