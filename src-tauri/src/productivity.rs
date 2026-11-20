@@ -125,6 +125,72 @@ async fn perform_update_check(
     apply_update_status(item, &st, &current_version);
 }
 
+/// 장시간 실행 중에도 새 릴리스를 찾도록 주기적으로 다시 확인한다.
+const UPDATE_RECHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+/// 트레이 메뉴를 열 때마다 확인하지 않도록 최소 간격을 둔다.
+const UPDATE_CHECK_COOLDOWN: Duration = Duration::from_secs(60);
+
+/// 자동 확인이 결과를 덮어써도 되는 상태인지 판단한다. 새 버전을 찾았거나 확인, 다운로드,
+/// 설치가 진행 중이면 사용자 동작을 우선한다.
+fn allows_background_check(status: &UpdateStatus) -> bool {
+    matches!(
+        status,
+        UpdateStatus::Idle | UpdateStatus::UpToDate | UpdateStatus::Failed
+    )
+}
+
+fn claim_update_check(last_check: &std::sync::Mutex<Option<Instant>>, force: bool) -> bool {
+    let Ok(mut last) = last_check.lock() else {
+        return false;
+    };
+    if !force && last.is_some_and(|at| at.elapsed() < UPDATE_CHECK_COOLDOWN) {
+        return false;
+    }
+    *last = Some(Instant::now());
+    true
+}
+
+/// 시작 시, 주기적으로, 트레이 메뉴를 열 때 실행하는 조용한 확인이다. 실패하면 대화상자 없이
+/// 기존 라벨을 유지하고, 다음 확인이나 수동 확인에서 다시 시도한다.
+async fn background_update_check(
+    app: &tauri::AppHandle,
+    item: &tauri::menu::MenuItem<Wry>,
+    status_lock: &tokio::sync::Mutex<UpdateStatus>,
+    pending_update: &tokio::sync::Mutex<Option<tauri_plugin_updater::Update>>,
+    last_check: &std::sync::Mutex<Option<Instant>>,
+    force: bool,
+) {
+    if !claim_update_check(last_check, force)
+        || !allows_background_check(&*status_lock.lock().await)
+    {
+        return;
+    }
+    let Ok(updater) = app.updater() else {
+        return;
+    };
+    let Ok(result) = updater.check().await else {
+        return;
+    };
+    // perform_update_check와 같은 순서로 잠가 교착을 막는다.
+    let mut pending = pending_update.lock().await;
+    let mut st = status_lock.lock().await;
+    if !allows_background_check(&st) {
+        return;
+    }
+    match result {
+        Some(update) => {
+            let version = update.version.clone();
+            *pending = Some(update);
+            *st = UpdateStatus::Available { version };
+        }
+        None => {
+            *pending = None;
+            *st = UpdateStatus::UpToDate;
+        }
+    }
+    apply_update_status(item, &st, &app.package_info().version.to_string());
+}
+
 async fn handle_update_action(
     app: &tauri::AppHandle,
     item: &tauri::menu::MenuItem<Wry>,
@@ -726,7 +792,6 @@ fn setup_tray(app: &tauri::AppHandle) -> anyhow::Result<()> {
         .map(|s| s.active_profile.clone())
         .unwrap_or_else(|_| "work".into());
 
-    let current_version = app.package_info().version.to_string();
     let update = MenuItem::with_id(app, "update", "업데이트 확인", true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
     let show = MenuItem::with_id(app, "show", "열기", true, None::<&str>)?;
@@ -765,27 +830,34 @@ fn setup_tray(app: &tauri::AppHandle) -> anyhow::Result<()> {
     let pending_update: Arc<tokio::sync::Mutex<Option<tauri_plugin_updater::Update>>> =
         Arc::new(tokio::sync::Mutex::new(None));
 
+    let last_update_check: Arc<std::sync::Mutex<Option<Instant>>> =
+        Arc::new(std::sync::Mutex::new(None));
+
     let app_auto = app.clone();
     let update_auto = update.clone();
     let status_auto = update_status.clone();
     let pending_auto = pending_update.clone();
-    let version_auto = current_version.clone();
+    let last_auto = last_update_check.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_secs(3)).await;
-        if let Ok(updater) = app_auto.updater() {
-            if let Ok(check_result) = updater.check().await {
-                let mut st = status_auto.lock().await;
-                if let Some(up) = check_result {
-                    let version = up.version.clone();
-                    *pending_auto.lock().await = Some(up);
-                    *st = UpdateStatus::Available { version };
-                } else {
-                    *st = UpdateStatus::UpToDate;
-                }
-                apply_update_status(&update_auto, &st, &version_auto);
-            }
+        loop {
+            background_update_check(
+                &app_auto,
+                &update_auto,
+                &status_auto,
+                &pending_auto,
+                &last_auto,
+                true,
+            )
+            .await;
+            tokio::time::sleep(UPDATE_RECHECK_INTERVAL).await;
         }
     });
+
+    let update_open = update.clone();
+    let status_open = update_status.clone();
+    let pending_open = pending_update.clone();
+    let last_open = last_update_check.clone();
 
     app.manage(TrayProfileMenu {
         work: work.clone(),
@@ -801,7 +873,24 @@ fn setup_tray(app: &tauri::AppHandle) -> anyhow::Result<()> {
         .tooltip("Challa")
         .menu(&menu)
         .show_menu_on_left_click(false)
-        .on_tray_icon_event(|tray, event| {
+        .on_tray_icon_event(move |tray, event| {
+            if matches!(
+                event,
+                TrayIconEvent::Click {
+                    button: MouseButton::Right,
+                    button_state: MouseButtonState::Down,
+                    ..
+                }
+            ) {
+                let app = tray.app_handle().clone();
+                let item = update_open.clone();
+                let st = status_open.clone();
+                let pu = pending_open.clone();
+                let last = last_open.clone();
+                tauri::async_runtime::spawn(async move {
+                    background_update_check(&app, &item, &st, &pu, &last, false).await;
+                });
+            }
             if matches!(
                 event,
                 TrayIconEvent::Click {
@@ -892,6 +981,28 @@ fn setup_tray(app: &tauri::AppHandle) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_update_check_keeps_user_driven_states() {
+        assert!(allows_background_check(&UpdateStatus::Idle));
+        assert!(allows_background_check(&UpdateStatus::UpToDate));
+        assert!(allows_background_check(&UpdateStatus::Failed));
+        assert!(!allows_background_check(&UpdateStatus::Checking));
+        let version = "0.2.3".to_string();
+        assert!(!allows_background_check(&UpdateStatus::Available { version: version.clone() }));
+        assert!(!allows_background_check(&UpdateStatus::Downloading { version: version.clone() }));
+        assert!(!allows_background_check(&UpdateStatus::Installing { version }));
+    }
+
+    #[test]
+    fn tray_open_update_check_respects_cooldown() {
+        let last = std::sync::Mutex::new(None);
+        assert!(claim_update_check(&last, false));
+        assert!(!claim_update_check(&last, false));
+        assert!(claim_update_check(&last, true));
+        *last.lock().unwrap() = Some(Instant::now() - UPDATE_CHECK_COOLDOWN - Duration::from_secs(1));
+        assert!(claim_update_check(&last, false));
+    }
 
     #[test]
     fn update_status_labels_follow_balance_guidelines() {
