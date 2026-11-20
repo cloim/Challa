@@ -16,6 +16,7 @@
         "height": 820,
         "minWidth": 720,
         "minHeight": 540,
+        "center": true,
         "theme": "Dark",
         "resizable": true,
         "fullscreen": false
