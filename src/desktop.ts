@@ -13,3 +13,4 @@ export async function saveDesktopSettings(preferences: DesktopPreferences): Prom
   return previewSettings();
 }
 export async function hideToTray(): Promise<void> { if (desktop) await invoke("hide_to_tray"); }
+export async function showMainWindow(): Promise<void> { if (desktop) await invoke("show_main_window"); }

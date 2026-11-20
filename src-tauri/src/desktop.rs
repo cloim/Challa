@@ -196,6 +196,11 @@ pub async fn save_desktop_settings(
     .map_err(|e| e.to_string())??;
     get_desktop_settings(app.clone(), app.state::<DesktopState>())
 }
+/// 트레이로 조용히 시작했더라도 사용자가 처리해야 할 일이 있을 때 관리 창을 띄운다.
+#[tauri::command]
+pub fn show_main_window(app: tauri::AppHandle) {
+    show_main(&app);
+}
 #[tauri::command]
 pub fn hide_to_tray(app: tauri::AppHandle) -> Result<(), String> {
     if !app

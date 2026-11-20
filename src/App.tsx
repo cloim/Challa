@@ -9,11 +9,15 @@ import type { ColDef, ICellRendererParams } from "ag-grid-community";
 import { DataGrid } from "./components/DataGrid";
 import { SelectControl } from "./components/SelectControl";
 import { DesktopSettings } from "./components/DesktopSettings";
+import { showMainWindow } from "./desktop";
 import { VaultPanel, VaultReferenceEditor } from "./components/VaultPanel";
 import challaMark from "./assets/challa-mark.svg";
-import { clearBuffer, deleteSnippet, desktop, engineStatus, fieldLabel, listSnippets, pauseEngine, recoverEngine, saveSnippet, syncVault, triggerLabels, type EngineStatus, type Snippet, type Trigger } from "./api";
+import { clearBuffer, deleteSnippet, desktop, engineStatus, fieldLabel, listSnippets, pauseEngine, recoverEngine, saveSnippet, syncVault, triggerLabels, vaultInfo, type EngineStatus, type Snippet, type Trigger, type VaultInfo } from "./api";
 
 const initialStatus: EngineStatus = { active: false, paused: false, vault: "Locked", error: null };
+// 시작 시 보관함 확인은 페이지 로드당 한 번만 한다. Bitwarden 확인은 동시에 하나만 허용되므로
+// StrictMode의 effect 재실행이 두 번째 확인을 보내면 Busy로 실패한다.
+let launchVaultCheck: Promise<VaultInfo> | null = null;
 function IconButton({ label, children, onClick, disabled = false }: { label: string; children: ReactNode; onClick: () => void; disabled?: boolean }) {
   return <button className="icon-button" aria-label={label} data-tip={label} onClick={onClick} disabled={disabled}>{children}</button>;
 }
@@ -56,6 +60,22 @@ export function App() {
     finally { setLoading(false); }
   }, []);
   useEffect(() => { void refresh(); }, [refresh]);
+  // 시작할 때 로그인은 되어 있지만 잠긴 보관함이면 잠금 해제 화면부터 보여 준다.
+  // 부팅 후 트레이로 자동 실행된 경우에도 잠금을 풀어야 보관함 스니펫이 동작하므로 창을 띄운다.
+  // 보관함 화면은 마운트 시 직접 상태를 확인하므로, 이미 그 화면이면 중복 확인하지 않는다.
+  // 사용자가 확인 중에 다른 화면으로 옮겼다면 그 선택을 존중한다.
+  useEffect(() => {
+    const start = location.hash;
+    if (!desktop || start === "#/vault") return;
+    let disposed = false;
+    launchVaultCheck ??= vaultInfo(true);
+    void launchVaultCheck.then(info => {
+      if (disposed || info.status !== "Locked" || location.hash !== start) return;
+      navigate("vault");
+      void showMainWindow().catch(e => setToast(String(e)));
+    }).catch(() => {});
+    return () => { disposed = true; };
+  }, []);
   useEffect(() => { const change = () => setPage(location.hash === "#/vault" ? "vault" : location.hash === "#/settings" ? "settings" : "library"); window.addEventListener("hashchange", change); return () => window.removeEventListener("hashchange", change); }, []);
   useEffect(() => {
     let disposed = false; const off: (() => void)[] = [];

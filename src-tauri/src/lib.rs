@@ -371,6 +371,7 @@ pub fn run() {
             desktop::get_desktop_settings,
             desktop::save_desktop_settings,
             desktop::hide_to_tray,
+            desktop::show_main_window,
             productivity::get_productivity_state,
             productivity::save_profiles,
             productivity::diagnose_snippet,
